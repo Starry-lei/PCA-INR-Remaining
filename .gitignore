@@ -1,0 +1,5 @@
+dataset/part_chair_leg_pca64
+dataset/__pycache__
+exp_shapeNet_chair_leg/
+wandb/
+models/__pycache__
