@@ -3,9 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.dgcnn import DGCNN_encoder
-
-from models.coordsenc import CoordsEncoder
+from models.dgcnn_order import DGCNN_encoder
 
 
 
@@ -13,7 +11,7 @@ class Model(nn.Module):
     def __init__(self, args):
         super(Model, self).__init__()
         self.num_input = args.num_input_points
-        self.latent_dim = args.latent_dim*4
+        self.latent_dim = args.latent_dim
         self.num_output = args.num_output_points
         self.device = args.device
         self.num_layers = args.num_layers
@@ -23,45 +21,12 @@ class Model(nn.Module):
 
         self.encoder = DGCNN_encoder(self.latent_dim)
 
+        # self.attn_module = Attention_Module(self.latent_dim, self.num_output)
 
-      
-        self.fc1 = nn.Linear(3, self.latent_dim //2)
-        self.fc2 = nn.Linear( self.latent_dim //2,  self.latent_dim)
-
-
-        
-        self.attn_module = Attention_Module(self.latent_dim, self.num_output)
-        
-        
-        self.pos_embed =PositionalEncoding(self.latent_dim)
-        nhead=4
-        dropout=0.02
-         # 3) Define TransformerEncoder
-        encoder_layer = nn.TransformerEncoderLayer(d_model=self.latent_dim, 
-                                                   nhead=nhead,
-                                                   dropout=dropout,
-                                                   batch_first=False)  # by default, PyTorch expects [S, B, E]
-        self.transformer = nn.TransformerEncoder(encoder_layer, 
-                                                 num_layers=self.num_layers)
-        
-        # 4) Final linear that maps from 'embed_dim' back to 3D if you want output coords
-        self.fc_out = nn.Linear(self.latent_dim, 3)
-
-        # self.coords_encoder = CoordsEncoder()
+        self.mlp = self.build_mlp(self.latent_dim)
 
 
-        self.mlp = nn.Sequential(
-            nn.Linear(self.latent_dim, self.latent_dim),
-            nn.LayerNorm(self.latent_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),  # Add small dropout
-            nn.Linear(self.latent_dim, self.latent_dim // 2),
-            nn.LayerNorm(self.latent_dim // 2),
-            nn.ReLU(),
-            nn.Linear(self.latent_dim // 2, 3),
-            nn.Tanh(),  # Add Tanh to bound output
-            nn.Identity() if self.training else lambda x: x * 0.02  # Scale output to match residual scale
-        )
+
     def build_mlp(self, latent_dim):
         # A simple MLP with ReLU activations
         layers = []
@@ -86,40 +51,24 @@ class Model(nn.Module):
         return nn.Sequential(*layers)
   
     def forward(self, points, pca_coeffs):
+        z, features = self.encoder(points)
 
-        B, N, _ = points.shape  # [B, N, 3]
-        # split the loss into 3 sub_losses for each dimensional 
+        # print("see features shape:",features.shape)# torch.Size([8, 1024, 128])
+        # Use transformer attention to predict residual
+        # features = features.transpose(2, 1)  # [B, N, latent_dim]
+        # print("see features shape:", features.shape) # features shape: torch.Size([8, 128, 1024]
+
+        residuals= self.mlp(features)
+
+        # print("see residuals:", residuals.shape)
+
+        # exit()
 
 
-        points=points.requires_grad_(True)
-        # points.requires_grad = True
-
-        features_per_point= F.relu(self.fc1(points))
-        features_per_point= F.relu(self.fc2(features_per_point))
-
-        residuals = self.mlp(features_per_point)                   # [B, N, 3]
+        # residuals = self.attn_module(features)  # [B, N, 3]
         deformed_points = points + residuals
         return deformed_points
         
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.05, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x = x + self.pe[:x.shape[0], :]
-        return self.dropout(x)
-    
 
 
 class Attention_Module(nn.Module):
@@ -129,7 +78,7 @@ class Attention_Module(nn.Module):
         self.latent_dim = latent_dim
 
         self.sa1 = cross_transformer(self.latent_dim,self.num_output)
-        # self.sa2 = cross_transformer(self.num_output,self.num_output)
+        self.sa2 = cross_transformer(self.num_output,self.num_output)
         # self.sa3 = cross_transformer(self.num_output,self.num_output)
 
        
@@ -140,7 +89,7 @@ class Attention_Module(nn.Module):
     def forward(self, x):
 
         x = self.sa1(x,x)
-        # x = self.sa2(x,x)
+        x = self.sa2(x,x)
         # x = self.sa3(x,x)
 
         residuals = self.residual_proj(x)  # [B, N, 3]

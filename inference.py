@@ -7,6 +7,7 @@ import datetime
 import os
 import yaml
 import torch
+import shutil
 import random
 import importlib
 import logging
@@ -67,18 +68,20 @@ def train(args):
 
     dataset_train = PCDataset(args, 'train')
     dataset_val = PCDataset(args, 'val')
+    # dataset_val= PCDataset(args, 'train')
+
 
     global_normalization= dataset_val.get_global_normalization()
 
 
-    # dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
+    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
     dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
     # logging.info('Length of train dataset:%d', len(dataloader_train))
     logging.info('Length of validation dataset:%d', len(dataloader_val))
 
 
     
-    # dataloader_train = accelerator.prepare_data_loader(dataloader_train)
+    dataloader_train = accelerator.prepare_data_loader(dataloader_train)
     dataloader_val = accelerator.prepare_data_loader(dataloader_val)
 
     # exit()
@@ -100,7 +103,7 @@ def train(args):
         model.apply(model_module.weights_init)
 
 
-    best_pth= "best_model_weights.pth"
+    best_pth= "latest_model_weights.pth"# latest_model_weights
 
     if os.path.exists(best_pth):
         model.load_state_dict(torch.load(best_pth))
@@ -111,34 +114,72 @@ def train(args):
     model.eval()
     best_val_loss = float('inf')   
 
-    # optimizer = optim.Adam(model.parameters(), lr=lr)
+    save_path= "./testShapes"
+
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    else:
+        shutil.rmtree(save_path)
+        os.makedirs(save_path)
+
+
+
+    # python inference.py -c cfgs/config_cat.yaml
     
     creterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
     global_step = 0
+    # chk_idx= 1
     with torch.no_grad():
         for epoch in range(num_epochs):
             total_loss = 0
             tqdm_train_loader = tqdm(dataloader_val, desc=f"Epoch {epoch + 1}/{num_epochs} Testing")
-            for pca_recon, pca_rep, pca_input in tqdm_train_loader:
+            for idx,  data in enumerate(tqdm_train_loader):
+                pca_recon, pca_rep, pca_input, name=data
 
-                deformed_points = model(pca_recon, pca_rep)
+                pred_residual = model(pca_recon, pca_rep) # dont use the deformed_points but the deformation between the estimated deformation and
+      
+                gt_res= pca_input-pca_recon
 
-                loss = 100.0*creterion(deformed_points, pca_input)
+                loss=creterion(pred_residual, gt_res)
+
+                deformed_points= pred_residual+pca_recon
 
                 print("val of loss:", loss) #  0.0023---> real loss:0.000023
+                print("name:", name) #  # 0.02
 
 
                 print("shape of deformed_points:", deformed_points.shape) # output: torch.Size([1, 1024, 3])
 
-                pcd_1= o3d.geometry.PointCloud()
-                pcd_1.points = o3d.utility.Vector3dVector(deformed_points[0].cpu().numpy())
+                # pcd_1= o3d.geometry.PointCloud()
+                # pcd_1.points = o3d.utility.Vector3dVector(deformed_points[0].cpu().numpy())
 
-                denormalized_deformed_points = dataset_val.denormalize_for_inference(pcd_1, global_normalization)
+                batch_size= len(deformed_points)
 
-                # save the point cloud
-                o3d.io.write_point_cloud("denormalized_deformed_points.ply", denormalized_deformed_points)
+                for chk_idx in range(0, batch_size):
 
-                exit()
+                    pcd_1= o3d.geometry.PointCloud()
+                    pcd_1.points=o3d.utility.Vector3dVector(deformed_points[chk_idx].cpu().numpy())
+                    pca_input_res= o3d.geometry.PointCloud()
+                    pca_input_res.points= o3d.utility.Vector3dVector(pca_input[chk_idx].cpu().numpy())
+
+                    denormalized_deformed_points = dataset_val.denormalize_for_inference(pcd_1)
+                    gt_pc_points = dataset_val.denormalize_for_inference(pca_input_res)
+
+                    # denormalized_deformed_point_pcd= o3d.geometry.PointCloud()
+                    # denormalized_deformed_point_pcd.points=o3d.utility.Vector3dVector(denormalized_deformed_points)
+
+                    # gt_pc_points_pcd= o3d.geometry.PointCloud()
+                    # gt_pc_points_pcd.points= o3d.utility.Vector3dVector(gt_pc_points)
+
+                    deformed_path= os.path.join(save_path,"deformed_"+name[chk_idx]+".ply" )
+                    gt_path=  os.path.join(save_path,"gt_pc_"+name[chk_idx]+".ply")
+                    # save the point cloud
+                    o3d.io.write_point_cloud(deformed_path, denormalized_deformed_points)
+                    o3d.io.write_point_cloud(gt_path, gt_pc_points)
+
+                
+                if idx==2:
+                    exit()
 
                
 
@@ -152,25 +193,25 @@ def train(args):
 
             
 
-                total_loss += loss.item()
+                # total_loss += loss.item()
 
                 
                 
-                tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
-                global_step += 1
+                # tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
+                # global_step += 1
 
 
         
 
-        model.eval()
-        with torch.no_grad():
-            val_loss = 0
-            num_batches= len(dataloader_val)
-            # print("num_batches:", num_batches)# 86
-            for pca_recon, pca_rep, pca_input in dataloader_val:
+        # model.eval()
+        # with torch.no_grad():
+        #     val_loss = 0
+        #     num_batches= len(dataloader_val)
+        #     # print("num_batches:", num_batches)# 86
+        #     for pca_recon, pca_rep, pca_input in dataloader_val:
 
-                loss = creterion(model(pca_recon, pca_rep), pca_input)
-                val_loss += loss.item()
+        #         loss = creterion(model(pca_recon, pca_rep), pca_input)
+        #         val_loss += loss.item()
 
             # val_loss /= num_batches
 
@@ -208,4 +249,6 @@ def main():
     #test() visualize the result
 
 if __name__ == '__main__':
+
+    # python inference.py -c cfgs/config.yaml
     main()

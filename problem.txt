@@ -1,0 +1,56 @@
+Given reconstructed PCA point cloud(64dim), mean shape, corresponding theta vector(64dim), and the orginal point cloud, both are ordered point cloud, 
+points at  the same index are corrrespondence,
+we aim to desgin a network to predict the 3D displacement between the reconstructed PCA pc and orginal pc, i.e., the residual
+
+I think the 3d displacement(residual) correlate with spatial patterns or local geometry , 
+because simple spatial patterns or local geometry corresponds to a small, zeros-centered sphere style residual, 
+complete spatial patterns or local geometry  corresponds to a large and divergent residual
+
+the ultimate is to learn to complement the missing residual , high frequency information in the spatial domain, 
+now, the network has no generalization, because we cannot learn what residual corresponds to what geometry, right? 
+the current setup only learns large residual for large complex geometry, and small residual for small variation geomerey
+
+
+
+So, how to solve this problem ? in spatial domain  or frequency domain?
+
+Residual Correlation: I believe that residuals do correlate with the input point cloud in the spatial domain 
+due to their high-frequency nature. This suggests that the spatial patterns or local geometry of the point cloud do not directly 
+influence the residuals in a straightforward manner.
+
+no, I think the 3d displacement(residual) still correlate with spatial patterns or local geometry , 
+because simple spatial patterns or local geometry corresponds to a small residual, 
+complete spatial patterns or local geometry  corresponds to a large and divergent residual
+
+Small Residuals: When the spatial patterns or local geometry of the point cloud match closely with the PCA reconstruction, you would expect smaller residuals. 
+This suggests that the simpler or more regular the spatial structure, the less deviation there is from the model's prediction.
+
+
+Large and Divergent Residuals: Conversely, complex or highly detailed spatial patterns would lead to larger residuals because PCA might not capture these nuances well. The residuals here could be both larger in magnitude and more 
+divergent in direction, reflecting the discrepancy between the complex geometry and the PCA's lower-dimensional approximation.
+
+
+
+X'(64dim, recon) --> MLP--> X,
+random--> confusing--> ?
+add unique information
+
+2.
+mean-->ref info-->MLP, X'(64dim, recon)-->cond-->MLP, --->cat, --->MLP = GT,X
+
+3. 
+random--> confusing--> ?
+add unique(additional ) information
+
+
+
+
+
+
+
+
+So, the condition is estimated PC displacement, the prediction should be the residual on the corresponding position.
+given estimated displacement, convert this condition into a residual.
+estimated displacement is the condition
+given a estimated displacement between the estimated ordered point cloud and a mean shape, and the GT displacement between the GT ordered point cloud and a mean shape,   I would like to use the estimated displacement as a condition for predicting a residual between itself and the  GT displacement.  what would the other input to the network be? is it a representation learning problem?
+during the inference phase, I   have only the  estimated displacement between  the estimated ordered point cloud, and a mean shape

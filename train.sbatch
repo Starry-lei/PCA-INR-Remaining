@@ -56,5 +56,5 @@ sleep 24h
 
 # scancel 1273195
 # sbatch train.sbatch
-# srun --jobid 1308821 --pty tmux a -t INR
+# srun --jobid 1309125 --pty tmux a -t INR
 #  squeue -u chengl

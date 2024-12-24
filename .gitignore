@@ -7,3 +7,6 @@ Training
 latest_model_weights.pth
 dataset/part_chair_leg_pca64.zip
 best_model_weights.pth
+pytorch-meta-794bf82/
+testShapes.zip
+testShapes/

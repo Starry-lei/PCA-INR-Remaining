@@ -9,13 +9,14 @@ class Model(nn.Module):
         self.hidden_size = args.hidden_size
         self.output_size = 3          # Residual vector (dx, dy, dz)
         self.num_layers = args.num_layers
+        self.num_points= 1024
 
         self.mlp = self.build_mlp()
 
     def build_mlp(self):
         # A simple MLP with ReLU activations
         layers = []
-        in_features = self.input_size
+        in_features = self.input_size* self.num_points
         out_features = self.hidden_size
 
         # First hidden layer
@@ -46,16 +47,12 @@ class Model(nn.Module):
         # points: [B, N, 3]
         batch_size, num_points, _ = points.shape
 
-        # Flatten to [B*N, 3]
-        flat_points = points.view(batch_size * num_points, 3)
-        
-        # If you wish to use pca_coeffs, you could do something like:
-        # pca_coeffs = pca_coeffs.expand(-1, num_points, -1)  # [B, N, pca_dim]
-        # flat_pca = pca_coeffs.reshape(batch_size * num_points, -1)
-        # flat_input = torch.cat([flat_points, flat_pca], dim=-1)
-        # residuals = self.mlp(flat_input).view(batch_size, num_points, 3)
+        points = points.permute(0, 2, 1)  # shape: [B, 3, 1024]
 
-        # For unconditioned MLP (no pca_coeffs)
+        # Flatten to [B*N, 3]
+        flat_points = points.view(batch_size , num_points*3)
+        
+
         residuals = self.mlp(flat_points).view(batch_size, num_points, 3)
 
         deformed_points = points + residuals

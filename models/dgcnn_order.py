@@ -12,16 +12,17 @@ import torch
 import torch.nn as nn
 import torch_cluster
 
-class DGCNN_encoder(nn.Module):
+class DGCNN_encoder_order(nn.Module):
     def __init__(self, latent_dim):
-        super(DGCNN_encoder, self).__init__()
-        self.num_neighs = 27 # TODO: try 10 ?
+        super(DGCNN_encoder_order, self).__init__()
+        self.num_neighs = 8 #27
         self.latent_dim = latent_dim
-        self.input_features = 3 * 2
+        self.input_features =(3+1) * 2
         self.only_true_neighs = True
         self.depth = 4
+        # self.depth = 3
         bb_size = 24
-        output_dim = self.latent_dim # 768
+        output_dim = self.latent_dim # 768 # 128
         self.convs = []
         for i in range(self.depth):
             in_features = self.input_features if i == 0 else bb_size * (2 ** (i+1)) * 2
@@ -39,11 +40,23 @@ class DGCNN_encoder(nn.Module):
         self.convs = nn.ModuleList(self.convs)
 
     def forward_per_point(self, x, start_neighs=None):
+
+
         self.num_points = x.shape[1]
         x = x.transpose(1, 2)  # DGCNN assumes BxFxN
 
-        if(start_neighs is None):
-            start_neighs = torch_cluster.knn(x,k=self.num_neighs)
+
+        # Add position encoding as additional features
+        batch_size, num_features, num_points = x.shape
+        position_ids = torch.arange(0, num_points, dtype=torch.float32, device=x.device)
+        position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)  # [B, N]
+        position_encoding = (position_ids / num_points).unsqueeze(1)  # [B, 1, N]
+
+
+        # Concatenate position encoding as additional feature
+        x = torch.cat([x, position_encoding], dim=1)  # [B, F+1, N] # see x shape here: torch.Size([8, 4, 1024])
+
+     
         
         x = get_graph_feature(x, k=self.num_neighs, idx=start_neighs, only_intrinsic=False)#only_intrinsic=self.hparams.only_intrinsic)
         other = x[:,:3,:,:]
@@ -59,23 +72,45 @@ class DGCNN_encoder(nn.Module):
         features = self.convs[-1](x)
         return features.transpose(1,2)
 
+
+    # Example: each point has 2 neighbors: [i-1, i+1], with boundary clamping
+    def build_index_neighbors(self, num_points, k=2):
+        """
+        Returns a (num_points, k) Tensor containing the index-based neighbors
+        for each point in a single sample.
+        """
+        idxs = []
+        half_win = k // 2
+        for i in range(num_points):
+            local_neighbors = []
+            for offset in range(-half_win, half_win + 1):
+                if offset == 0:
+                    continue
+                neigh = i + offset
+                neigh = max(0, min(num_points - 1, neigh))  # clamp boundaries
+                local_neighbors.append(neigh)
+            idxs.append(local_neighbors)
+        # shape -> (num_points, k)
+        return torch.tensor(idxs, dtype=torch.long)
+
+
     def forward(self, x, return_neighs=False):
         self.num_points = x.shape[1]
         batch_size = x.shape[0]
         sigmoid_for_classification=True
-        edge_index = [
-            torch_cluster.knn(x[i], x[i], self.num_neighs,)
-            for i in range(x.shape[0])
-        ]
-        neigh_idx = torch.stack(
-            [edge_index[i][1].reshape(x.shape[1], -1) for i in range(x.shape[0])]
-        )
+        # neigh_idx = torch.stack(
+        #     [edge_index[i][1].reshape(x.shape[1], -1) for i in range(x.shape[0])]
+        # )
+        # Build index-based neighbors for each sample in the batch
+        neigh_idx_list = []
+        for i in range(batch_size):
+            neighs_i = self.build_index_neighbors(num_points=self.num_points, k=self.num_neighs)
+            neigh_idx_list.append(neighs_i)
+        
+        # Stack them to shape (B, 1024, k)
+        neigh_idx = torch.stack(neigh_idx_list, dim=0)  # (B, N, k)
         features_per_point = self.forward_per_point(x, start_neighs=neigh_idx) # dense_output_feature, B N F
         global_feature, _ = torch.max(features_per_point.transpose(1,2), 2)
-
-        avg_features = torch.mean(features_per_point, dim=1)
-        std_features = torch.std(features_per_point, dim=1)
-
 
 
         global_feature = global_feature.view(batch_size, -1)
@@ -85,13 +120,7 @@ class DGCNN_encoder(nn.Module):
             return global_feature, features_per_point
 
 
-def knn(x, k):
-    inner = -2 * torch.matmul(x.transpose(2, 1), x)
-    xx = torch.sum(x ** 2, dim=1, keepdim=True)
-    pairwise_distance = -xx - inner - xx.transpose(2, 1)
 
-    idx = pairwise_distance.topk(k=k, dim=-1)[1]  # (batch_size, num_points, k)
-    return idx
 
 
 def create_feature_neighs(x, neigh_idxs):
@@ -120,13 +149,11 @@ def get_graph_feature(x, k, idx=None, only_intrinsic=False, permute_feature=True
     batch_size = x.size(0)
     num_points = x.size(2)
     x = x.view(batch_size, -1, num_points)
-    if idx is None:
-        idx = knn(x, k=k)  # (batch_size, num_points, k)
-    else:
-        if(len(idx.shape)==2):
-            idx = idx.unsqueeze(0).repeat(batch_size,1,1)
-        idx = idx[:, :, :k]
-        k = min(k,idx.shape[-1])
+    
+    if(len(idx.shape)==2):
+        idx = idx.unsqueeze(0).repeat(batch_size,1,1)
+    idx = idx[:, :, :k]
+    k = min(k,idx.shape[-1])
 
     num_idx = idx.shape[1]
 
@@ -144,16 +171,16 @@ def get_graph_feature(x, k, idx=None, only_intrinsic=False, permute_feature=True
     ).contiguous()  # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
     feature = x.view(batch_size * num_points, -1)[idx, :]
     feature = feature.view(batch_size, num_idx, k, num_dims)
+
+
     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
 
     if only_intrinsic is True:
         feature = feature - x
-    elif only_intrinsic == 'neighs':
-        feature = feature
-    elif only_intrinsic == 'concat':
-        feature = torch.cat((feature, x), dim=3)
     else:
-        feature = torch.cat((feature - x, x), dim=3)
+        local_diff = feature - x
+        seq_weight = 0.5
+        feature = torch.cat((local_diff, x), dim=3)  # Keep original dimensionality
 
     if permute_feature:
         feature = feature.permute(0, 3, 1, 2).contiguous()

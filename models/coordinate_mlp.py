@@ -138,15 +138,17 @@ class CondSIREN(nn.Module):
 
         self.net = []
 
+        film_conditioning= False
+
 
         self.net.append(ImplicitMLPLayer(in_features, num_hidden, bias=True,
                         omega_0=first_omega_0, w_norm=False, activation="sine", 
-                        film_conditioning=True, concat_conditioning=0,
+                        film_conditioning=film_conditioning, concat_conditioning=0,
                         init_method={"weights": 'siren_first', "bias": "polar"}))
         for i in range(num_layers-1):
             self.net.append(ImplicitMLPLayer(num_hidden, num_hidden, bias=True,
                             omega_0=hidden_omega_0, w_norm=False, activation="sine", 
-                            film_conditioning=True, concat_conditioning=0,
+                            film_conditioning=film_conditioning, concat_conditioning=0,
                             init_method={"weights": 'siren', "bias": "polar"}))
             
         self.net.append(ImplicitMLPLayer(num_hidden, out_features, bias=True,
@@ -164,7 +166,8 @@ class CondSIREN(nn.Module):
         # print("see  gamma shape", gamma.shape)# torch.Size([8, 1024, 512])
         # print("see  beta shape", beta.shape) # torch.Size([8, 1024, 512])
 
-        output = self.net[0](x, gamma=gamma, beta=beta)
+        # output = self.net[0](x, gamma=gamma, beta=beta)
+        output = self.net[0](x)
 
         # print("see  1output shape", output.shape)# torch.Size([8, 1024, 512])
 
@@ -217,6 +220,7 @@ class Model(nn.Module):
         """
         batch_size, num_points, _ = points.shape
         pca_coeffs = pca_coeffs.expand(-1, num_points, -1)
+        points= points.requires_grad_(True)
         residuals = self.mlp(points,pca_coeffs)  
         # print("see residuals", residuals.shape) # see residuals torch.Size([8, 1024, 3])
         # exit()

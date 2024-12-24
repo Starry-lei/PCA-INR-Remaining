@@ -12,17 +12,33 @@ import open3d as o3d
 
 # use mean shape for normalization
 
-def normalize_bounding_box(mean_shape, pca_input, pca_recon):
+def normalize_bounding_box(global_normalization, pca_input, pca_recon):
     # culate the axis-aligned bounding box
-    aabb_center = mean_shape[0]
-    scale_factor= mean_shape[1]
+    aabb_center = global_normalization[0]
+    scale_factor= global_normalization[1]
+
+    # mean_shape.translate(-aabb_center)   
     pca_input.translate(-aabb_center)    
     pca_recon.translate(-aabb_center)
     # Calculate extents of the bounding box
     # Apply the scaling
+    # mean_shape.scale(scale_factor, center=[0, 0, 0])
     pca_input.scale(scale_factor, center=[0, 0, 0])  # Scale around the new origin    
     pca_recon.scale(scale_factor, center=[0, 0, 0])
-    return pca_input, pca_recon
+
+
+
+    # pca_input= pca_input-mean_shape
+    # pca_recon.points = 
+
+    # pca_recon.points = o3d.utility.Vector3dVector(np.array(pca_recon.points) - np.array(mean_shape.points))
+
+    # normalized_mean_shape=mean_shape
+    normalized_pca_input= pca_input
+    normalized_pca_recon=pca_recon
+
+
+    return normalized_pca_input, normalized_pca_recon
 
 
 
@@ -39,7 +55,15 @@ class PCDataset(data.Dataset):
         self.mean_shape_pcd = o3d.geometry.PointCloud()
         self.mean_shape_pcd.points = o3d.utility.Vector3dVector(self.mean_shape)
 
-        self.global_normalization = self.get_scale_factor( self.mean_shape_pcd)
+        # o3d.visualization.draw_geometries([self.mean_shape_pcd])
+
+        self.normalized_mean_shape_pcd, self.global_normalization = self.get_scale_factor( self.mean_shape_pcd)
+
+
+        # save it 
+
+        # o3d.io.write_point_cloud("mean.pcd", self.normalized_mean_shape_pcd)
+        # o3d.visualization.draw_geometries([self.normalized_mean_shape_pcd])
         # print("see mean shape", self.mean_shape.shape) # 1024，3
         # exit()
 
@@ -76,10 +100,14 @@ class PCDataset(data.Dataset):
             pca_recon_points_pcd.points = o3d.utility.Vector3dVector(pca_recon_points)
 
 
-            pca_input_points_pcd, pca_recon_points_pcd = normalize_bounding_box(self.global_normalization ,pca_input_points_pcd, pca_recon_points_pcd)
+            normalized_pca_input, normalized_pca_recon = normalize_bounding_box(self.global_normalization, pca_input_points_pcd, pca_recon_points_pcd)
  
-            self.pca_input_points_sets.append(np.asarray(pca_input_points_pcd.points))
-            self.pca_recon_points_sets.append(np.asarray(pca_recon_points_pcd.points))
+            self.pca_input_points_sets.append(np.asarray(normalized_pca_input.points))
+            self.pca_recon_points_sets.append(np.asarray(normalized_pca_recon.points))
+
+            # self.pca_input_points_sets.append(np.asarray(pca_input_points_pcd))
+            # self.pca_recon_points_sets.append(np.asarray(pca_recon_points_pcd))
+
             self.pca_rep_sets.append(pca_rep)
             self.names.append(file.replace(".txt", ""))
 
@@ -99,18 +127,51 @@ class PCDataset(data.Dataset):
         # Determine the scaling factor as the reciprocal of the norm of the extents
         scale_factor = 1 / norm_extent  
 
+        mean_shape_pcd.translate(-aabb_center)
+        mean_shape_pcd.scale(scale_factor, center=[0, 0, 0])
+
+        # print("see scale_factor:",scale_factor)
+        # exit()
 
 
-        return (aabb_center, scale_factor)
 
-    def denormalize_for_inference(self, pcd, scale_factors):
+        return mean_shape_pcd, (aabb_center, scale_factor)
+    
+
+    def get_mean_shape(self):
+
+        mean_shape_points= np.array(self.normalized_mean_shape_pcd.points)
+        return mean_shape_points
+
+    # def denormalize_for_inference(self, pcd, scale_factors):
+    
+    #     aabb_center= scale_factors[0]
+    #     scale_factor = scale_factors[1]
+    #     # Inverse the scaling
+    #     pcd.scale(1/scale_factor, center=[0, 0, 0])
+    #     # Inverse the translation
+    #     pcd= pcd.translate(aabb_center)
+        
+    #     return pcd
+
+
+    def denormalize_for_inference(self, pcd, scale_factors=None):
+
+        # pcd.points= o3d.utility.Vector3dVector(np.array(pcd.points)+np.array(self.normalized_mean_shape_pcd.points))
+
+        # normalized_mean_shape_pcd
+
+        scale_factors= self.get_global_normalization()
     
         aabb_center= scale_factors[0]
         scale_factor = scale_factors[1]
         # Inverse the scaling
-        pcd.scale(1/scale_factor, center=[0, 0, 0])
+        
         # Inverse the translation
         pcd= pcd.translate(aabb_center)
+        pcd.scale(1/scale_factor, center=[0, 0, 0])
+
+        # pcd= pcd+self.mean_shape
         
         return pcd
     
@@ -140,7 +201,7 @@ class PCDataset(data.Dataset):
 
 
 
-        return pca_recon, pca_rep, pca_input
+        return pca_recon, pca_rep, pca_input, name
 
     def __len__(self):
         return len(self.pca_input_points_sets)

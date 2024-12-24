@@ -18,8 +18,24 @@ from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.utils import DistributedType
 from torch.nn.utils import clip_grad_norm_
 from torch.cuda.amp import GradScaler, autocast
-
+from torch.optim.lr_scheduler import CosineAnnealingLR
+# from chamfer3D import dist_chamfer_3D
+# from fscore import fscore
 import open3d as o3d
+
+
+# def calc_cd(output, gt, calc_f1=False, f1_threshold=0.0001):
+#     cham_loss = dist_chamfer_3D.chamfer_3DDist()
+#     dist1, dist2, _, _ = cham_loss(gt, output)
+#     cd_p = (torch.sqrt(dist1).mean(1) + torch.sqrt(dist2).mean(1)) / 2
+#     # cd_t = (dist1.mean(1) + dist2.mean(1))
+#     cd_t = (dist1.sum(1) + dist2.sum(1))
+#     if calc_f1:
+#         f1, _, _ = fscore(dist1, dist2, f1_threshold)
+#         return cd_p, cd_t, f1
+#     else:
+#         return cd_p, cd_t
+    
 
 output_dir= "./output_dir"
 wandb.init(project="PCA_Remainig", entity="thesis_lei")
@@ -55,11 +71,29 @@ def log_point_clouds_grid( point_clouds, n_rows=2, n_cols=4):
         wandb.log({"point_clouds_layout": wandb.Html(html)})
 
 
+def check_nan(tensor, name):
+    if torch.isnan(tensor).any():
+        print(f"NaN detected in {name}")
+        print(f"Number of NaN values: {torch.isnan(tensor).sum().item()}")
+        print(f"Tensor shape: {tensor.shape}")
+        print(f"Min value: {tensor[~torch.isnan(tensor)].min().item() if (~torch.isnan(tensor)).any() else 'all NaN'}")
+        print(f"Max value: {tensor[~torch.isnan(tensor)].max().item() if (~torch.isnan(tensor)).any() else 'all NaN'}")
+        return True
+    return False
+
 def mean_flat(tensor):
     """
     Take the mean over all non-batch dimensions.
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
+
+
+def adaptive_weight(residuals):
+    # Higher weight for smaller residuals, assuming they are from simpler structures
+    weights = 1 / (torch.abs(residuals) + 1e-8)  # Add small constant to avoid division by zero
+    return weights / torch.max(weights)  # Normalize weights
+
+
 
 
 def train(args):
@@ -92,11 +126,15 @@ def train(args):
     dataset_train = PCDataset(args, 'train')
     dataset_val = PCDataset(args, 'val')
 
-    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
+    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
     dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
     logging.info('Length of train dataset:%d', len(dataloader_train))
     logging.info('Length of validation dataset:%d', len(dataloader_val))
 
+    
+
+    mean_shape= torch.tensor(dataset_train.get_mean_shape(), device= args.device, dtype=torch.float) # 1024, 3
+    
     dataloader_train = accelerator.prepare_data_loader(dataloader_train)
     dataloader_val = accelerator.prepare_data_loader(dataloader_val)
 
@@ -124,50 +162,55 @@ def train(args):
     betas = (float(betas[0].strip()), float(betas[1].strip()))
 
     optimizer = getattr(optim, args.optimizer)  
-    optimizer = optimizer(model.parameters(), lr=lr, weight_decay=args.weight_decay, betas=betas)
+    optimizer = optimizer(model.parameters(), lr=lr, weight_decay=args.weight_decay, betas=betas,eps=1e-8)
+
+
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # optimizer,
+    # max_lr=1e-4,
+    # epochs=num_epochs,
+    # steps_per_epoch=len(dataloader_train),
+    # pct_start=0.3,  # Warm up for 30% of training
+    # div_factor=25,  # Initial lr = max_lr/25
+    # final_div_factor=1000  # Final lr = max_lr/1000
+    # )
     
     # optimizer = optim.Adam(model.parameters(), lr=lr)
 
     model, optimizer = accelerator.prepare(model, optimizer)
     
-    creterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
+    creterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none', try it not mean loss reduction='none'
+
+    loss_scale= 100.0
     global_step = 0
     for epoch in range(num_epochs):
 
         model.train()
         total_loss = 0
         tqdm_train_loader = tqdm(dataloader_train, desc=f"Epoch {epoch + 1}/{num_epochs} Training")
-        for pca_recon, pca_rep, pca_input in tqdm_train_loader:
 
-            deformed_points = model(pca_recon, pca_rep)
+        for pca_recon, pca_rep, pca_input, name in tqdm_train_loader:
 
-            # # visualize the input and output point clouds
-            # pcd_1= o3d.geometry.PointCloud()
-            # pcd_1.points = o3d.utility.Vector3dVector(pca_recon[0].cpu().numpy())
+            # pred_residual= mean_shape.unsqueeze(0).expand(pca_recon.shape[0], -1, -1)
 
-            # pcd_2= o3d.geometry.PointCloud()
-            # pcd_2.points = o3d.utility.Vector3dVector(pca_input[0].cpu().numpy())
+            pred_residual = model(pca_recon, pca_rep) # dont use the deformed_points but the deformation between the estimated deformation and
+      
+            gt_res= pca_input-pca_recon
 
-            # o3d.visualization.draw_geometries([pcd_1])
-            # o3d.visualization.draw_geometries([pcd_2])
-            # exit()
-            # print("shape of deformed_points:", deformed_points.shape) # output: torch.Size([8, 1024, 3])
-            # print("shape of pca_input:", pca_input.shape) # pca_input: torch.Size([8, 1024, 3])
-            # exit()
+            loss= loss_scale* creterion(pred_residual, gt_res)
+            # loss_sum_dim1 = loss_per_element.sum(dim=1) 
+            # loss_per_sample = loss_sum_dim1.sum(dim=1) 
+            # loss = loss_per_sample.mean()
 
-            loss = 100.0*creterion(deformed_points, pca_input)# shape of loss: torch.Size([2, 1024, 3]) 
+           
 
-            # print("val of loss:", loss) #  0.0023---> real loss:0.000023
 
-            # loss= mean_flat(loss) / args.batch_size
-            # print("shape of loss:", loss.shape) # shape of loss: torch.Size([2])
-            # exit()
 
             optimizer.zero_grad()
-            # loss.backward()
             accelerator.backward(loss)
             clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            # scheduler.step()
 
             total_loss += loss.item()
 
@@ -176,15 +219,7 @@ def train(args):
             tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
             
 
-            # print("shape of pca_recon:", pca_recon.shape)
-            # print("shape of pca_rep:", pca_rep.shape)
-            # print("shape of pca_input:", pca_input.shape)
-            # shape of pca_recon: torch.Size([8, 1024, 3]) 
-            # shape of pca_rep: torch.Size([8, 1, 64])
-            # shape of pca_input: torch.Size([8, 1024, 3])
-            # print("device of pca_recon:", pca_recon.device) # cuda:0
-            # print("device of pca_rep:", pca_rep.device)
-            # print("device of pca_input:", pca_input.device)
+
 
         
 
@@ -193,19 +228,22 @@ def train(args):
             val_loss = 0
             num_batches= len(dataloader_val)
             # print("num_batches:", num_batches)# 86
-            for pca_recon, pca_rep, pca_input in dataloader_val:
+            for pca_recon, pca_rep, pca_input, name in dataloader_val:
 
-                loss = creterion(model(pca_recon, pca_rep), pca_input)
+                ref_mean_shape= mean_shape.unsqueeze(0).expand(pca_recon.shape[0], -1, -1)
+
+                pred_residual = model(pca_recon, pca_rep)
+                gt_res= pca_input-pca_recon
+                loss =  loss_scale* creterion(pred_residual, gt_res)
                 val_loss += loss.item()
-                # print("shape of pca_recon:", pca_recon.shape)
-                # print("shape of pca_rep:", pca_rep.shape)
-                # print("shape of pca_input:", pca_input.shape)
-                # shape of pca_recon: torch.Size([8, 1024, 3])
-                # shape of pca_rep: torch.Size([8, 1, 64])
-                # shape of pca_input: torch.Size([8, 1024, 3])
+      
 
 
-            # val_loss /= num_batches
+            val_loss /= num_batches
+            # val_loss = val_loss*1000.0
+            # scheduler.step(val_loss)
+
+        
 
         wandb.log({
             "val_loss": val_loss,
@@ -249,9 +287,7 @@ def train(args):
             
 
 
-        
-
-
+    
 
 
 def main():
