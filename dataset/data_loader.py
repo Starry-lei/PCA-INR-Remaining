@@ -12,10 +12,10 @@ import open3d as o3d
 
 # use mean shape for normalization
 
-def normalize_bounding_box(mean_shape, pca_input, pca_recon):
+def normalize_bounding_box(global_normalization, pca_input, pca_recon):
     # culate the axis-aligned bounding box
-    aabb_center = mean_shape[0]
-    scale_factor= mean_shape[1]
+    aabb_center = global_normalization[0]
+    scale_factor= global_normalization[1]
     pca_input.translate(-aabb_center)    
     pca_recon.translate(-aabb_center)
     # Calculate extents of the bounding box
@@ -23,6 +23,14 @@ def normalize_bounding_box(mean_shape, pca_input, pca_recon):
     pca_input.scale(scale_factor, center=[0, 0, 0])  # Scale around the new origin    
     pca_recon.scale(scale_factor, center=[0, 0, 0])
     return pca_input, pca_recon
+
+
+def normalize_mean_shape(global_normalization, mean_shape):
+    aabb_center = global_normalization[0]
+    scale_factor= global_normalization[1]
+    mean_shape.translate(-aabb_center)    
+    mean_shape.scale(scale_factor, center=[0, 0, 0])  # Scale around the new origin    
+    return mean_shape
 
 
 
@@ -40,8 +48,9 @@ class PCDataset(data.Dataset):
         self.mean_shape_pcd.points = o3d.utility.Vector3dVector(self.mean_shape)
 
         self.global_normalization = self.get_scale_factor( self.mean_shape_pcd)
-        # print("see mean shape", self.mean_shape.shape) # 1024，3
-        # exit()
+
+        self.normalized_mean_shape_pcd =normalize_mean_shape(self.global_normalization, self.mean_shape_pcd)
+     
 
         print(f"Loading {set_type} data")
         print(self.data_path)# dataset/part_chair_leg_pca64

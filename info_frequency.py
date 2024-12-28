@@ -9,6 +9,7 @@ import yaml
 import torch
 import random
 import importlib
+import pywt
 import logging
 import sys
 import torch.optim as optim
@@ -21,47 +22,13 @@ from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 import open3d as o3d
 
-import pytorch3d
-from pytorch3d import loss
-
-
-def calc_cd(output, gt):
-    cd_l1, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=1, point_reduction='sum')
-    cd_l2, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=2, batch_reduction=None, point_reduction='sum')
-    return cd_l1, cd_l2
-
 output_dir= "./output_dir"
-wandb.init(project="PCA_flow_displacement", entity="thesis_lei")
+# wandb.init(project="PCA_Remainig", entity="thesis_lei")
 # PCA-Conditioned Residual SIREN MLP
 
 # the input is PCA reduced 3D point cloud and the corresponding projection parameters, the output is the 3D point cloud before PCA reduction
 # I would like to learn a residual prediction model to predict the residual between the PCA reduced 3D point cloud and the original 3D point cloud
 # the point cloud in the dataset is already normalized by the bounding box, and all the points in the dataset are ordered, whcih means points at the same index are correspondence
-
-def log_point_clouds_grid( point_clouds, n_rows=2, n_cols=4):
-        """
-        Create a 4x6 grid of interactive 3D point clouds
-        Args:
-            point_clouds: list of point clouds, each with shape (4096, 3)
-        """
-        # Create HTML table for 4x6 grid layout
-        html = "<table style='border-spacing: 10px;'>"
-        
-        for i in range(n_rows):  # 4 rows
-            html += "<tr>"
-            for j in range(n_cols):  # 6 columns
-                idx = i * n_cols + j
-                if idx < len(point_clouds):
-                    html += "<td style='border: 1px solid gray; padding: 5px;'>"
-                    # Log each point cloud directly
-                    wandb.log({f"shape_{idx}": wandb.Object3D(point_clouds[idx])})
-                    html += f"<div style='width: 250px; height: 250px;'></div>"
-                    html += f"<div style='text-align: center;'>Shape {idx}</div>"
-                    html += "</td>"
-            html += "</tr>"
-        html += "</table>"
-
-        wandb.log({"point_clouds_layout": wandb.Html(html)})
 
 
 def mean_flat(tensor):
@@ -69,6 +36,61 @@ def mean_flat(tensor):
     Take the mean over all non-batch dimensions.
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
+
+def wavelet_transform_tensor(tensor, wavelet='db1', level=None):
+    """
+    Apply wavelet transformation to a tensor.
+    
+    Args:
+        tensor (torch.Tensor): Input tensor of shape (batch_size, channels, height, width)
+        wavelet (str): Wavelet type to use (default: 'db1')
+        level (int): Decomposition level (default: None, which means maximum possible level)
+    
+    Returns:
+        list: Coefficients from wavelet transformation
+    """
+    # Move tensor to CPU and convert to numpy
+    if tensor.is_cuda:
+        tensor = tensor.cpu()
+    np_array = tensor.numpy()
+    
+    # Process each sample and channel independently
+    batch_size, channels, dim = np_array.shape
+    coeffs_batch = []
+    
+    for b in range(batch_size):
+        coeffs_channels = []
+        for c in range(channels):
+            # Apply 2D wavelet transform
+            coeffs = pywt.wavedec2(np_array[b, c], wavelet, level=level)
+            coeffs_channels.append(coeffs)
+        coeffs_batch.append(coeffs_channels)
+    
+    return coeffs_batch
+
+def inverse_wavelet_transform_tensor(coeffs_batch, wavelet='db1', original_shape=None):
+    """
+    Apply inverse wavelet transformation to coefficients.
+    
+    Args:
+        coeffs_batch (list): List of wavelet coefficients
+        wavelet (str): Wavelet type used (default: 'db1')
+        original_shape (tuple): Shape of the original tensor (batch_size, channels, height, width)
+    
+    Returns:
+        torch.Tensor: Reconstructed tensor
+    """
+    batch_size = len(coeffs_batch)
+    channels = len(coeffs_batch[0])
+    reconstructed = np.zeros((batch_size, channels, *original_shape[-2:]))
+    
+    for b in range(batch_size):
+        for c in range(channels):
+            # Apply inverse 2D wavelet transform
+            reconstructed[b, c] = pywt.waverec2(coeffs_batch[b][c], wavelet)
+    
+    return torch.from_numpy(reconstructed)
+
 
 
 def train(args):
@@ -101,7 +123,7 @@ def train(args):
     dataset_train = PCDataset(args, 'train')
     dataset_val = PCDataset(args, 'val')
 
-    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
     dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
     logging.info('Length of train dataset:%d', len(dataloader_train))
     logging.info('Length of validation dataset:%d', len(dataloader_val))
@@ -121,21 +143,10 @@ def train(args):
 
     model_module = importlib.import_module('.%s' % args.model_name, 'models')
     model = model_module.Model(args)
-    model = model.to(device) 
+    model = model.to(device) # PCA residual MLP
 
     if hasattr(model_module, 'weights_init'):
         model.apply(model_module.weights_init)
-
-
-
-    # Awkward workaround to get gradients from odeint_adjoint to lat_params.
-    # lat_params = torch.nn.Parameter(
-    #     torch.randn(fullset.n_shapes, args.lat_dims) * 1e-1, requires_grad=True
-    # )
-
-    # deformer.add_lat_params(lat_params)
-    # deformer.to(device)
-    # all_model_params = list(deformer.parameters())
 
      
     best_val_loss = float('inf')   
@@ -149,87 +160,109 @@ def train(args):
     # optimizer = optim.Adam(model.parameters(), lr=lr)
 
     model, optimizer = accelerator.prepare(model, optimizer)
-
-
-    the_pca_mean_shape = torch.from_numpy(np.array(dataset_train.normalized_mean_shape_pcd.points)).float().to(device)
-    the_pca_mean_shape = the_pca_mean_shape.unsqueeze(0)
-    print("shape of the_pca_mean_shape:", the_pca_mean_shape.shape) # shape of the_pca_mean_shape: torch.Size([1,1024, 3])
     
-    criterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
+    creterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
     global_step = 0
     for epoch in range(num_epochs):
 
         model.train()
         total_loss = 0
         tqdm_train_loader = tqdm(dataloader_train, desc=f"Epoch {epoch + 1}/{num_epochs} Training")
-        for pca_recon, pca_theta, pca_input in tqdm_train_loader:
+        for pca_recon, pca_rep, pca_input in tqdm_train_loader:
 
-            pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1)# # torch.Size([4, 1024, 3])
-            # print("shape of pca_theta:", pca_theta.shape) # torch.Size([4, 1, 64])
-            pca_theta= pca_theta.squeeze(1)
-            # print("shape of pca_input:", pca_input.shape) # torch.Size([4, 1024, 3])
-            mean_latents= torch.zeros_like(pca_theta)
-            # batch together source and target shape for two-way loss training
-            source_target_points = torch.cat([pca_mean_shape, pca_input], dim=0)
-            target_source_points = torch.cat([pca_input, pca_mean_shape], dim=0)
-            # print("see source_target_points shape :", source_target_points.shape)#  torch.Size([8, 1024, 3])
-            source_target_latents = torch.cat([mean_latents, pca_theta], dim=0)
-            target_source_latents = torch.cat([pca_theta, mean_latents], dim=0)
-            # print("see target_source_latents shape :", target_source_latents.shape)#  torch.Size([8, 64])
+            pca_residual= pca_input - pca_recon
 
-            # print("device of source_target_points:",source_target_points.device) # cuda0
-            # exit()
-            latent_seq = torch.stack(
-                [source_target_latents, target_source_latents], dim=1
-            )
+
+            # Apply wavelet transform to PCA reconstruction
+            recon_coeffs = wavelet_transform_tensor(pca_recon, wavelet='db4', level=3)
+
+            print("Recon coeffs shape:", recon_coeffs.shape)
+            
+            # Apply wavelet transform to PCA residual
+            residual_coeffs = wavelet_transform_tensor(pca_residual, wavelet='db4', level=3)
+
+
+            print("Residual coeffs shape:", residual_coeffs.shape)
+
+            exit()
+
+
+            def analyze_frequency_components(coeffs_batch):
+                """
+                Analyze frequency components from wavelet coefficients.
+                Returns statistical measures for each level.
+                """
+                stats = []
+                for b in range(len(coeffs_batch)):
+                    batch_stats = []
+                    for c in range(len(coeffs_batch[0])):
+                        level_stats = []
+                        coeffs = coeffs_batch[b][c]
+                        
+                        # Calculate statistics for each decomposition level
+                        for level_coeffs in coeffs[1:]:  # Skip the approximation coefficients
+                            h, v, d = level_coeffs
+                            level_energy = np.sum(h**2) + np.sum(v**2) + np.sum(d**2)
+                            level_stats.append({
+                                'energy': level_energy,
+                                'mean_magnitude': (np.mean(np.abs(h)) + np.mean(np.abs(v)) + np.mean(np.abs(d))) / 3,
+                                'max_magnitude': max(np.max(np.abs(h)), np.max(np.abs(v)), np.max(np.abs(d)))
+                            })
+                        batch_stats.append(level_stats)
+                    stats.append(batch_stats)
+                return stats
+            
+            # Analyze frequency components
+            recon_freq_stats = analyze_frequency_components(recon_coeffs)
+            residual_freq_stats = analyze_frequency_components(residual_coeffs)
+            
+            # Optional: Reconstruct signals if needed
+            reconstructed_recon = inverse_wavelet_transform_tensor(recon_coeffs, 
+                                                                wavelet='db4', 
+                                                                original_shape=pca_recon.shape)
+            reconstructed_residual = inverse_wavelet_transform_tensor(residual_coeffs, 
+                                                                    wavelet='db4', 
+                                                                    original_shape=pca_residual.shape)
+            
+            # Verify reconstruction accuracy
+            recon_error = torch.mean((pca_recon - reconstructed_recon)**2)
+            residual_error = torch.mean((pca_residual - reconstructed_residual)**2)
+
+            print(f"Reconstruction Error: {recon_error.item()}")
+            print(f"Residual Error: {residual_error.item()}")
+    
+
+
+            # freuency domain of the pca_recon
+
+            # freuency domain of the pca_residual
+
+
+            exit()
+
 
             
-            deformed_pts = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
-            # print("see latent_seq shape :", latent_seq.shape)# torch.Size([8, 2, 64])
-            # print("see deformed_pts shape :", deformed_pts.shape)
-
-            cd_l1, loss_cd_l2= calc_cd(deformed_pts, target_source_points)
-            loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
-            loss_mse= criterion(deformed_pts, target_source_points)
-            # print("see cd_l1, cd_l2:",cd_l1, loss_cd_l2)            
-            # print("see loss_cd :", loss_cd)
-            # print("see loss_mse :", loss_mse)
-            # print("see loss shape :", loss)
-            loss = loss_cd+loss_mse
-
-
-            # loss = criterion(deformed_pts, target_source_points) # geometry aware?
-            # exit()
+            
+            
             # deformed_points = model(pca_recon, pca_rep)
-            # # visualize the input and output point clouds
-            # pcd_1= o3d.geometry.PointCloud()
-            # pcd_1.points = o3d.utility.Vector3dVector(pca_recon[0].cpu().numpy())
-            # pcd_2= o3d.geometry.PointCloud()
-            # pcd_2.points = o3d.utility.Vector3dVector(pca_input[0].cpu().numpy())
-            # o3d.visualization.draw_geometries([pcd_1])
-            # o3d.visualization.draw_geometries([pcd_2])
-            # exit()
-            # print("shape of deformed_points:", deformed_points.shape) # output: torch.Size([8, 1024, 3])
-            # print("shape of pca_input:", pca_input.shape) # pca_input: torch.Size([8, 1024, 3])
-            # exit()
-
             # loss = 100.0*creterion(deformed_points, pca_input)# shape of loss: torch.Size([2, 1024, 3]) 
 
             # print("val of loss:", loss) #  0.0023---> real loss:0.000023
+
             # loss= mean_flat(loss) / args.batch_size
             # print("shape of loss:", loss.shape) # shape of loss: torch.Size([2])
             # exit()
 
-            optimizer.zero_grad()
-            # loss.backward()
-            accelerator.backward(loss)
-            clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            # optimizer.zero_grad()
+            # # loss.backward()
+            # accelerator.backward(loss)
+            # clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # optimizer.step()
 
-            total_loss += loss.item()
+            # total_loss += loss.item()
 
             
-            wandb.log({"train_loss": loss.item()}, step=global_step)
+            # wandb.log({"train_loss": loss.item()}, step=global_step)
             tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
             
 
@@ -250,37 +283,23 @@ def train(args):
             val_loss = 0
             num_batches= len(dataloader_val)
             # print("num_batches:", num_batches)# 86
-            for pca_recon, pca_theta, pca_input in dataloader_val:
+            for pca_recon, pca_rep, pca_input in dataloader_val:
 
-                # loss = creterion(model(pca_recon, pca_rep), pca_input)
-                pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1)# # torch.Size([4, 1024, 3])
-                pca_theta= pca_theta.squeeze(1)
-                mean_latents= torch.zeros_like(pca_theta)
-                # batch together source and target shape for two-way loss training
-                source_target_points = torch.cat([pca_mean_shape, pca_input], dim=0)
-                target_source_points = torch.cat([pca_input, pca_mean_shape], dim=0)
-                source_target_latents = torch.cat([mean_latents, pca_theta], dim=0)
-                target_source_latents = torch.cat([pca_theta, mean_latents], dim=0)
-    
-                latent_seq = torch.stack(
-                    [source_target_latents, target_source_latents], dim=1
-                )
-
-                deformed_pts = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
-                cd_l1, loss_cd_l2= calc_cd(deformed_pts, target_source_points)
-                loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
-                loss_mse= criterion(deformed_pts, target_source_points)
-                loss = loss_cd+loss_mse
-
-
+                loss = creterion(model(pca_recon, pca_rep), pca_input)
                 val_loss += loss.item()
+                # print("shape of pca_recon:", pca_recon.shape)
+                # print("shape of pca_rep:", pca_rep.shape)
+                # print("shape of pca_input:", pca_input.shape)
+                # shape of pca_recon: torch.Size([8, 1024, 3])
+                # shape of pca_rep: torch.Size([8, 1, 64])
+                # shape of pca_input: torch.Size([8, 1024, 3])
 
 
-            val_loss /= num_batches
+            # val_loss /= num_batches
 
-        wandb.log({
-            "val_loss": val_loss,
-        }, step=global_step)
+        # wandb.log({
+        #     "val_loss": val_loss,
+        # }, step=global_step)
 
 
         global_step += 1
@@ -310,12 +329,12 @@ def train(args):
         #         wandb.log(point_clouds_dict)
 
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), 'best_model_weights.pth')
-            wandb.log({"best_val_loss": best_val_loss})
+        # if val_loss < best_val_loss:
+        #     best_val_loss = val_loss
+        #     torch.save(model.state_dict(), 'best_model_weights.pth')
+        #     wandb.log({"best_val_loss": best_val_loss})
 
-        torch.save(model.state_dict(), 'latest_model_weights.pth')
+        # torch.save(model.state_dict(), 'latest_model_weights.pth')
 
             
 
@@ -358,6 +377,4 @@ def main():
     #test() visualize the result
 
 if __name__ == '__main__':
-    # conda activate diffTheta
-    # python train.py -c cfgs/config.yaml
     main()

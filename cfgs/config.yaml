@@ -1,10 +1,24 @@
 !munch.Munch
 dataset: dataset/part_chair_leg_pca64
 work_dir: exp_shapeNet_chair_leg/
-batch_size: 8
-model_name: dgcnn_transfomer
+batch_size: 4
+model_name: displacement_flow # displacement_flow # dgcnn_transfomer
 device: cuda:0
 epochs: 1000
+
+
+lat_dims: 64
+deformer_nf: 128
+solver: 'dopri5'
+adjoint: True
+arch: "imnet"
+nonlin: 'leakyrelu'
+rtol: 0.0001
+atol: 0.0001
+via_hub: False
+symm: True
+return_waypoints: False
+use_latent_waypoints: False
 
 input_size: 3
 hidden_size: 512
