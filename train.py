@@ -232,7 +232,7 @@ def train(args):
             wandb.log({"train_loss": loss.item()}, step=global_step)
             tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
             
-
+git checkout -b flow_deformer
             # print("shape of pca_recon:", pca_recon.shape)
             # print("shape of pca_rep:", pca_rep.shape)
             # print("shape of pca_input:", pca_input.shape)
