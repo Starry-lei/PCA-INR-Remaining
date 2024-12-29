@@ -12,6 +12,7 @@ import importlib
 import logging
 import sys
 import torch.optim as optim
+import torch.nn as nn
 import wandb
 from tqdm import tqdm
 from accelerate import Accelerator, InitProcessGroupKwargs
@@ -20,6 +21,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.cuda.amp import GradScaler, autocast
 import numpy as np
 import open3d as o3d
+import torch.distributed as dist
 
 import pytorch3d
 from pytorch3d import loss
@@ -31,7 +33,7 @@ def calc_cd(output, gt):
     return cd_l1, cd_l2
 
 output_dir= "./output_dir"
-wandb.init(project="PCA_flow_displacement", entity="thesis_lei")
+# wandb.init(project="PCA_flow_displacement", entity="thesis_lei")
 # PCA-Conditioned Residual SIREN MLP
 
 # the input is PCA reduced 3D point cloud and the corresponding projection parameters, the output is the 3D point cloud before PCA reduction
@@ -84,6 +86,7 @@ def train(args):
     init_handler = InitProcessGroupKwargs()
     init_handler.timeout = datetime.timedelta(seconds=5400)  # change timeout to avoid a strange NCCL bug
     accelerator = Accelerator(
+        log_with="wandb",
         mixed_precision= 'no', #'fp16',
         gradient_accumulation_steps=1,
         # log_with=args.report_to,
@@ -92,6 +95,16 @@ def train(args):
         # even_batches=True,
         kwargs_handlers=[init_handler]
     )
+
+
+    accelerator.init_trackers(
+        project_name="PCA_flow_displacement",
+        init_kwargs={"wandb": {"entity": "thesis_lei"}}
+    )
+
+
+
+
     # LOG.info(accelerator.state)
     num_gpus = accelerator.state.num_processes
     print(f"Number of GPUs being used: {num_gpus}")
@@ -101,15 +114,16 @@ def train(args):
     dataset_train = PCDataset(args, 'train')
     dataset_val = PCDataset(args, 'val')
 
-    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
-    dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
+    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers), pin_memory=True)
+    dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers), pin_memory=True)
     logging.info('Length of train dataset:%d', len(dataloader_train))
     logging.info('Length of validation dataset:%d', len(dataloader_val))
 
     dataloader_train = accelerator.prepare_data_loader(dataloader_train)
     dataloader_val = accelerator.prepare_data_loader(dataloader_val)
 
-    # exit()
+
+   
     if not args.manual_seed:
         seed = random.randint(1, 10000)
     else:
@@ -117,27 +131,21 @@ def train(args):
     logging.info('Random Seed: %d' % seed)
     random.seed(seed)
     torch.manual_seed(seed)
-    device = args.device
+    # device = args.device
 
     model_module = importlib.import_module('.%s' % args.model_name, 'models')
     model = model_module.Model(args)
-    model = model.to(device) 
+
+
+    model = model.to(accelerator.device)
+
+
+    print(f"Model device: {next(model.parameters()).device}")
 
     if hasattr(model_module, 'weights_init'):
         model.apply(model_module.weights_init)
 
 
-
-    # Awkward workaround to get gradients from odeint_adjoint to lat_params.
-    # lat_params = torch.nn.Parameter(
-    #     torch.randn(fullset.n_shapes, args.lat_dims) * 1e-1, requires_grad=True
-    # )
-
-    # deformer.add_lat_params(lat_params)
-    # deformer.to(device)
-    # all_model_params = list(deformer.parameters())
-
-     
     best_val_loss = float('inf')   
     lr = args.lr
     betas = args.betas.split(',')
@@ -147,24 +155,44 @@ def train(args):
     optimizer = optimizer(model.parameters(), lr=lr, weight_decay=args.weight_decay, betas=betas)
     
     # optimizer = optim.Adam(model.parameters(), lr=lr)
+    # model, optimizer = accelerator.prepare(model, optimizer)
 
-    model, optimizer = accelerator.prepare(model, optimizer)
+    # if accelerator.is_main_process:
+    #     print("Before prepare barrier")
+    # dist.barrier()  # Barrier before prepare
 
 
-    the_pca_mean_shape = torch.from_numpy(np.array(dataset_train.normalized_mean_shape_pcd.points)).float().to(device)
+    accelerator.wait_for_everyone()
+
+    # print("Preparing model and optimizer for distributed training...")
+    try:
+        model, optimizer = accelerator.prepare(model, optimizer)
+        # TODO: figure out why get stuck here?!
+        print(f"Successfully prepared model and optimizer. Model on device: {next(model.parameters()).device}")
+    except Exception as e:
+        print(f"Error preparing model and optimizer: {e}")
+
+    # print(f"3Model device: {next(model.parameters()).device}")
+
+    device = accelerator.device
+    # print("Accelerator Device:", device)
+    # exit()
+
+
+    the_pca_mean_shape = torch.from_numpy(np.array(dataset_train.normalized_mean_shape_pcd.points)).float() #.to(device)
     the_pca_mean_shape = the_pca_mean_shape.unsqueeze(0)
     print("shape of the_pca_mean_shape:", the_pca_mean_shape.shape) # shape of the_pca_mean_shape: torch.Size([1,1024, 3])
     
     criterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
     global_step = 0
     for epoch in range(num_epochs):
-
+        print(f"Starting epoch {epoch + 1}")
         model.train()
         total_loss = 0
         tqdm_train_loader = tqdm(dataloader_train, desc=f"Epoch {epoch + 1}/{num_epochs} Training")
         for pca_recon, pca_theta, pca_input in tqdm_train_loader:
 
-            pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1)# # torch.Size([4, 1024, 3])
+            pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1).to(pca_input.device) # # torch.Size([4, 1024, 3])
             # print("shape of pca_theta:", pca_theta.shape) # torch.Size([4, 1, 64])
             pca_theta= pca_theta.squeeze(1)
             # print("shape of pca_input:", pca_input.shape) # torch.Size([4, 1024, 3])
@@ -223,16 +251,19 @@ def train(args):
             optimizer.zero_grad()
             # loss.backward()
             accelerator.backward(loss)
-            clip_grad_norm_(model.parameters(), max_norm=1.0)
+            # clip_grad_norm_(model.parameters(), max_norm=1.0)
+            accelerator.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item()
 
             
-            wandb.log({"train_loss": loss.item()}, step=global_step)
+            # wandb.log({"train_loss": loss.item()}, step=global_step)
+
+            accelerator.log({"train_loss": loss.item()}, step=global_step)
+
             tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
             
-git checkout -b flow_deformer
             # print("shape of pca_recon:", pca_recon.shape)
             # print("shape of pca_rep:", pca_rep.shape)
             # print("shape of pca_input:", pca_input.shape)
@@ -278,9 +309,8 @@ git checkout -b flow_deformer
 
             val_loss /= num_batches
 
-        wandb.log({
-            "val_loss": val_loss,
-        }, step=global_step)
+        # wandb.log({"val_loss": val_loss,}, step=global_step)
+        accelerator.log({"val_loss": val_loss.item()}, step=global_step)
 
 
         global_step += 1
@@ -346,8 +376,10 @@ def main():
             exp_name = args.model_name
         exp_name += '_'+print_time.replace(':',"-")
         log_dir = os.path.join(args.work_dir, args.dataset, exp_name)
-        if not os.path.exists(log_dir):
-            os.makedirs(log_dir)
+
+        os.makedirs(log_dir, exist_ok=True)
+        # if not os.path.exists(log_dir):
+        #     os.makedirs(log_dir)
 
         print("log_dir:",log_dir)
         logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(os.path.join(log_dir, 'train.log')),
@@ -358,6 +390,11 @@ def main():
     #test() visualize the result
 
 if __name__ == '__main__':
-    # conda activate diffTheta
+    # conda activate diffTheta3D
+    # conda activate freereg++
     # python train.py -c cfgs/config.yaml
+    # try multi-gpu:
+    # accelerate launch train.py -c cfgs/config.yaml
+    # accelerate launch --multi_gpu --num_processes=4 train.py -c cfgs/config.yaml
+    # accelerate launch --num_processes=1 train.py -c cfgs/config.yaml
     main()

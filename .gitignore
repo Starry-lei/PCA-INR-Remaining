@@ -9,3 +9,4 @@ dataset/part_chair_leg_pca64.zip
 best_model_weights.pth
 dataset/pretrained_ckpt/
 testShapes/
+pytorch-meta-794bf82/
