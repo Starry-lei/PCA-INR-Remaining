@@ -10,6 +10,8 @@ import open3d as o3d
 
 
 
+
+
 # use mean shape for normalization
 
 def normalize_bounding_box(global_normalization, pca_input, pca_recon):
@@ -32,6 +34,9 @@ def normalize_mean_shape(global_normalization, mean_shape):
     mean_shape.scale(scale_factor, center=[0, 0, 0])  # Scale around the new origin    
     return mean_shape
 
+
+
+# perform SSM computation heere, integrate the precomputed PCA basis into the network
 
 
 

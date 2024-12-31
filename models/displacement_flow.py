@@ -5,7 +5,7 @@ from torchdiffeq import odeint as odeint_regular
 from .pde_layer import PDELayer
 from .shared_definition import NONLINEARITIES
 import numpy as np
-
+import torch.nn.functional as F
 
 class ImNet(nn.Module):
     """ImNet layer pytorch implementation."""
@@ -175,6 +175,7 @@ class DeformationFlowNetwork(nn.Module):
         for m in self.net.modules():
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, mean=0, std=1e-1)
+                # nn.init.normal_(m.weight, mean=0, std=1)
                 nn.init.constant_(m.bias, val=0)
         if divfree:
             self.curl = self._get_curl_layer()
@@ -277,7 +278,7 @@ class ConformalDeformationFlowNetwork(nn.Module):
         self.nonlinearity = nonlinearity
         self.output_scalar = output_scalar
 
-        self.scale = nn.Parameter(torch.ones(1) * 1e-1)
+        self.scale = nn.Parameter(torch.ones(1) * 0.01)
 
         nlin = NONLINEARITIES[nonlinearity]
 
@@ -412,7 +413,10 @@ class NeuralFlowModel(nn.Module):
         self.arch = arch
         self.encoder = None
         self.lat_params = None
-        self.scale = nn.Parameter(torch.ones(1) * 1e-3)
+        self.scale = nn.Parameter(torch.ones(1) * 1e-1)
+        self.latent_sequence=None
+        # self.scale = nn.Parameter(torch.ones(1))
+        
 
     def add_encoder(self, encoder):
         self.encoder = encoder
@@ -447,15 +451,97 @@ class NeuralFlowModel(nn.Module):
         self.latent_seq_weight = (
             self.latent_seq_len / self.latent_seq_len_sum[:, None]
         )  # [batch, nsteps-1]
+
+
+        # print("show self.latent_seq_weight!!!:",self.latent_seq_weight)#[1,1]
+        # show self.latent_seq_weight!!!: tensor([[1.],[1.]], device='cuda:0')
+
+    
+
         self.latent_seq_bins = torch.cumsum(
             self.latent_seq_weight, dim=1
         )  # [batch, nsteps-1]
+
+        # print("show self.self.latent_seq_bins!!!:",self.latent_seq_bins)#[1,1]
+
+
         self.latent_seq_bins = torch.cat(
             [torch.zeros([bs, 1], device=dev), self.latent_seq_bins], dim=1
         )  # [batch, nsteps]
+
+
+        # print("show self.self.self.latent_seq_bins!!!:",self.latent_seq_bins)#[1,1]
+
+
         self.latent_updated = True
 
         return self.latent_seq_bins
+
+    def twopoints_latent_at_t(self, t, return_sign=False):
+        """Helper fn to compute latent at t."""
+
+
+        t = t.to(self.latent_seq_bins.device)
+        # t = t.detach()
+        # find out which bin this t falls into
+        # Linear interpolation coefficient
+        alpha = (t - self.latent_seq_bins[:, 0]) / (self.latent_seq_bins[:, 1] - self.latent_seq_bins[:, 0])  # [batch]
+        
+        # alpha=alpha.requires_grad_(False)
+        latent_t0 = self.latent_sequence[:, 0]  # [batch, latent_size]
+        latent_t1 = self.latent_sequence[:, 1]  # [batch, latent_size]
+        print("check grad of latent_t0:",latent_t0.requires_grad) # True
+        print("check grad of latent_t1:",latent_t1.requires_grad) # True
+        print("check grad of alpha:",alpha.requires_grad) # False
+        print("check grad of self.latent_seq_bins:",self.latent_seq_bins.requires_grad) # True
+        latent_val = latent_t0 + alpha.unsqueeze(-1) * (latent_t1 - latent_t0)
+
+
+        print("check grad of latent_val:",latent_val.requires_grad) # False
+        exit()
+
+        # print("check grad of latent_t0:",latent_t0.requires_grad) # False
+        # print("check val of latent_t0_n:",latent_t0_n) 
+
+       
+
+        print("shape of batch_idx:",batch_idx.shape)
+        print("shape of bin_idx:",bin_idx.shape)
+        print("dtype of batch_idx:",batch_idx.dtype)
+        print("dtype of bin_idx:",bin_idx.dtype)
+
+        latent_t1 = self.latent_sequence[batch_idx, bin_idx + 1]  # [batch, latent_size]
+        print("check grad of latent_t1:", latent_t1.requires_grad)
+        print("check val of latent_t1:", latent_t1)
+
+
+ 
+    
+        
+
+
+
+
+
+
+
+
+        # check grad of latent_t1: False
+        exit()
+
+
+        latent_val = latent_t0 + alpha[:, None] * (latent_t1 - latent_t0)
+
+        
+        latent_dir = (latent_t1 - latent_t0) / torch.norm(
+            latent_t1 - latent_t0, dim=1, keepdim=True
+        )
+        zeros = torch.zeros_like(latent_t0)
+        outward = torch.norm(latent_t0 - zeros, dim=1) < 1e-6  # [batch]
+        # So -1 indicates the latent point is not near the origin (norm > 1e-6), which affects the direction of transformation.
+        sign = (outward.float() - 0.5) * 2
+
+        return latent_val, latent_dir, sign
 
     def latent_at_t(self, t, return_sign=False):
         """Helper fn to compute latent at t."""
@@ -465,29 +551,32 @@ class NeuralFlowModel(nn.Module):
             t < self.latent_seq_bins[:, 1:]
         )
         # logical and
-
         bin_mask = bin_mask.float()
         bin_idx = torch.argmax(bin_mask, dim=1)  # [batch,]
         batch_idx = torch.arange(bin_idx.shape[0]).to(bin_idx.device)
 
-        # Find the interpolation coefficient between the latents at the two
         # ends of the bin
         t0 = self.latent_seq_bins[batch_idx, bin_idx]
         t1 = self.latent_seq_bins[batch_idx, bin_idx + 1]  # [batch]
-        alpha = (t - t0) / (t1 - t0)  # [batch]
+        alpha = (t - t0) / (t1 - t0)  # [batch]            
         latent_t0 = self.latent_sequence[
             batch_idx, bin_idx
         ]  # [batch, latent_size]
-        latent_t1 = self.latent_sequence[
-            batch_idx, bin_idx + 1
-        ]  # [batch, latent_size]
+
+        
+
+        latent_t1 = self.latent_sequence[batch_idx, bin_idx + 1]  # [batch, latent_size]
         latent_val = latent_t0 + alpha[:, None] * (latent_t1 - latent_t0)
         latent_dir = (latent_t1 - latent_t0) / torch.norm(
             latent_t1 - latent_t0, dim=1, keepdim=True
         )
         zeros = torch.zeros_like(latent_t0)
         outward = torch.norm(latent_t0 - zeros, dim=1) < 1e-6  # [batch]
+        # So -1 indicates the latent point is not near the origin (norm > 1e-6), which affects the direction of transformation.
         sign = (outward.float() - 0.5) * 2
+
+        # print("check grad of latent_val:",latent_val.requires_grad) # False
+        # exit()
 
         return latent_val, latent_dir, sign
 
@@ -499,6 +588,7 @@ class NeuralFlowModel(nn.Module):
         Returns:
           vel: [batch, num_points, dim]
         """
+        
         # Reparametrize eval along latent path as a function of a single
         # scalar t
         if not self.latent_updated:
@@ -507,18 +597,48 @@ class NeuralFlowModel(nn.Module):
                 "Use .update_latents() to update the source and target latents"
             )
 
-        latent_val, latent_dir, sign = self.latent_at_t(t)
-        sign = sign[:, None, None] * self.scale
-        if self.symm_dim is None:
-            flow = self.flow_net(latent_val, points)  # [batch, num_pints, dim]
+        if self.training:
+
+            with torch.set_grad_enabled(True):
+
+                points.requires_grad_(True)
+                latent_val, latent_dir, sign = self.latent_at_t(t)
+                # print("show self.scale:",self.scale)
+                sign = sign[:, None, None] * self.scale
+                if self.symm_dim is None:
+                    # print("symm_dim show points grad:",points.requires_grad)
+                    flow = self.flow_net(latent_val, points)  # [batch, num_pints, dim]
+                else:
+                    flow = symmetrize(self.flow_net, latent_val, points, self.symm_dim)
+                # Normalize velocity based on time space proportional to latent
+                # difference.
+                # print("before show flow:",flow)
+
+
+                # print("see self.latent_seq_len_sum[:, None, None]:",self.latent_seq_len_sum[:, None, None])
+                flow *= self.latent_seq_len_sum[:, None, None]
+                # print("show flow after :",flow)
+                if not self.no_sign_net:
+                    sign = self.sign_net(latent_dir)
+                flow_signed=flow * sign
+            return flow_signed
+        
         else:
-            flow = symmetrize(self.flow_net, latent_val, points, self.symm_dim)
-        # Normalize velocity based on time space proportional to latent
-        # difference.
-        flow *= self.latent_seq_len_sum[:, None, None]
-        if not self.no_sign_net:
-            sign = self.sign_net(latent_dir)
-        return flow * sign
+            latent_val, latent_dir, sign = self.latent_at_t(t)
+            sign = sign[:, None, None] * self.scale
+            if self.symm_dim is None:
+                # print("symm_dim show points grad:",points.requires_grad)
+                flow = self.flow_net(latent_val, points)  # [batch, num_pints, dim]
+            else:
+                flow = symmetrize(self.flow_net, latent_val, points, self.symm_dim)
+           
+            flow *= self.latent_seq_len_sum[:, None, None]
+            # print("show flow after :",flow)
+            if not self.no_sign_net:
+                sign = self.sign_net(latent_dir)
+            flow_signed=flow * sign
+            return flow_signed
+
 
 
 class Model(nn.Module):
@@ -531,7 +651,7 @@ class Model(nn.Module):
         self.arch = args.arch
         self.adjoint = args.adjoint
         self.nonlinearity= args.nonlin
-        self.no_sign_net= True
+        self.no_sign_net= True # try sign net 
         self.deformer_nf= args.deformer_nf
 
 
@@ -545,6 +665,15 @@ class Model(nn.Module):
         self.atol = args.atol
         self.via_hub = args.via_hub
         self.symm_dim = (2 if args.symm else None)
+
+
+        self.latent_dim=64
+        self.latent_en= nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim),
+            nn.LayerNorm(self.latent_dim),  # Normalize scale
+            nn.LeakyReLU(),
+            nn.Linear(self.latent_dim, self.latent_dim),
+        )
 
         self.net = NeuralFlowModel(
             dim=3,
@@ -634,18 +763,35 @@ class Model(nn.Module):
                 )  # [batch, nsteps=3, lat_dim]
         
         
+
+
+
+        points = points.requires_grad_(True)
+        latent_sequence = latent_sequence.requires_grad_(True)
+
+
+        # Integrate a pre-Computed PCA Basis into the deformation flow field
+
+        
+        # print("see latent_sequence:",latent_sequence.shape)# torch.Size([2, 2, 64])
+        is_nonzero = torch.any(latent_sequence != 0, dim=-1)
+        encoded = torch.zeros_like(latent_sequence)
+        encoded[is_nonzero] = self.latent_en(latent_sequence[is_nonzero])
+        
+ 
         waypoints = self.net.update_latents(latent_sequence)
 
         # print("see waypoints shape:",waypoints.shape) #  torch.Size([8, 2])
         # print("see waypoints values:",waypoints) #  torch.Size([8, 2])
-       
+        
 
         if self.use_latent_waypoints:
             timing = waypoints[0]
         else:
             timing = self.timing
 
-
+        timing = self.timing.clone().requires_grad_(True)
+        # print("see timing vals:",timing)# [0., 1.]
         points_transformed = self.odeint(
             self.net,
             points,
@@ -653,7 +799,29 @@ class Model(nn.Module):
             method=self.method,
             rtol=self.rtol,
             atol=self.atol,
+            # adjoint_options={'requires_grad': True}
         )
+
+
+        # print("show waypoints requires_grad:", waypoints.requires_grad) # True
+        # print("show points_transformed requires_grad:", points_transformed.requires_grad)# True
+        # print("show points requires_grad:", points.requires_grad) # True
+        # print("show timing grad:", timing.requires_grad) # True
+
+
+        deform_magnitude = torch.norm(points_transformed - points).item()
+        print(f"Deformation magnitude: {deform_magnitude}")
+        # print(f"Flow network grad norm: {torch.norm(next(self.net.flow_net.parameters()).grad).item()}"
+        # exit()
+
+
+        deform_abs = torch.mean(
+                torch.norm(points - points_transformed, dim=-1)
+            )
+        print("deform_abs deformation!",deform_abs)
+        if deform_abs < 1e-6:
+            print("no deformation!")
+            exit()
 
         # exit()
         if self.return_waypoints:

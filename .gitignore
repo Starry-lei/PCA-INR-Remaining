@@ -9,3 +9,6 @@ dataset/part_chair_leg_pca64.zip
 best_model_weights.pth
 dataset/pretrained_ckpt/
 testShapes/
+bug_handling/
+bug_handling_un_symm/
+torchdiffeq-master/
