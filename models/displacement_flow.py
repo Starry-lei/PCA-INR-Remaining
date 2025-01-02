@@ -6,8 +6,100 @@ from .pde_layer import PDELayer
 from .shared_definition import NONLINEARITIES
 import numpy as np
 import torch.nn.functional as F
+import open3d as o3d
 
-class ImNet(nn.Module):
+
+class SinusoidalEncoding(nn.Module):
+    def __init__(self, num_freqs=16, index_scale=1.0):
+        """
+        Sinusoidal positional encoding.
+        
+        Args:
+            num_freqs: number of frequency bands
+            index_scale: optional scaling factor for indices
+        """
+        super(SinusoidalEncoding, self).__init__()
+        self.num_freqs = num_freqs
+        self.index_scale = index_scale
+        self.out_dim = 2 * num_freqs  # sin and cos for each frequency
+        
+    def forward(self, idx):
+        """
+        Compute sinusoidal encoding for given indices.
+        
+        Args:
+            idx: [batch_size] tensor of indices
+        Returns:
+            enc: [batch_size, 2 * num_freqs] positional encoding
+        """
+        # Convert to float and scale
+        idx_float = idx.float() * self.index_scale  # [batch_size]
+        
+        # Generate frequency bands: 2^[0, 1, 2, ...]
+        freqs = 2.0 ** torch.arange(self.num_freqs, device=idx.device, dtype=idx_float.dtype)
+        
+        # Compute phase for each frequency
+        idx_expanded = idx_float.unsqueeze(-1) * freqs  # [batch_size, num_freqs]
+        
+        # Compute sin and cos encodings
+        sin_enc = torch.sin(idx_expanded)  # [batch_size, num_freqs]
+        cos_enc = torch.cos(idx_expanded)  # [batch_size, num_freqs]
+        
+        # Interleave sin and cos
+        enc = torch.stack((sin_enc, cos_enc), dim=-1)  # [batch_size, num_freqs, 2]
+        enc = enc.view(idx.shape[0], -1)  # [batch_size, 2 * num_freqs]
+        
+        return enc
+    
+def visualize_encodings():
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    # Create encoder
+    encoder = SinusoidalEncoding(num_freqs=8, index_scale=1.0/(1024-1))
+    
+    # Generate indices for 1024 points
+    indices = torch.arange(1024)
+    
+    # Get encodings
+    with torch.no_grad():
+        encodings = encoder(indices).numpy()
+    
+    # Plot first few frequency bands
+    plt.figure(figsize=(15, 5))
+    
+    # Plot sin components
+    for i in range(4):  # Show first 4 frequencies
+        plt.plot(encodings[:, i], label=f'sin freq {i}')
+    
+    plt.title('First 4 Sinusoidal Components')
+    plt.xlabel('Position Index')
+    plt.ylabel('Encoding Value')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+    
+    # Print distinctiveness analysis
+    print("Encoding shape:", encodings.shape)
+    
+    # Check correlation between different positions
+    pos_a = encodings[0]    # First position
+    pos_b = encodings[1]    # Adjacent position
+    pos_m = encodings[512]  # Middle position
+    
+    # Compute cosine similarities
+    def cos_sim(a, b):
+        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    
+    print("\nCosine Similarities:")
+    print(f"Adjacent positions (0,1): {cos_sim(pos_a, pos_b):.4f}")
+    print(f"Far positions (0,512): {cos_sim(pos_a, pos_m):.4f}")
+    
+    # Check if encodings are unique
+    unique_encodings = np.unique(encodings, axis=0)
+    print(f"\nNumber of unique encodings: {len(unique_encodings)} (should be 1024)")
+
+class ImNet(nn.Module): # develop a transformation based IMNet?
     """ImNet layer pytorch implementation."""
 
     def __init__(
@@ -52,6 +144,18 @@ class ImNet(nn.Module):
         Returns:
           output through this layer of shape [batch_size, out_features].
         """
+
+
+        # # visualize_encodings()
+        # point_indices = torch.arange(self.num_points, device=x.device)
+        # pos_encoding= self.pos_encoder(point_indices)
+        # batch_size= x.shape[0] // self.num_points
+        # pos_encoding = pos_encoding.expand(batch_size, -1, -1)        
+        # pos_encoding = pos_encoding.reshape(-1, pos_encoding.shape[-1])
+        # # print("show new pos_encoding shape:",pos_encoding.shape)
+        # x = torch.cat([x, pos_encoding], dim=-1)
+        # # exit()
+
         x_tmp = x
         for dense in self.fc[:4]:
             x_tmp = self.activ(dense(x_tmp))
@@ -392,6 +496,8 @@ class NeuralFlowModel(nn.Module):
         else:
             model = DeformationFlowNetwork
         self.no_sign_net = no_sign_net
+
+        
         self.flow_net = model(
             dim=dim,
             latent_size=latent_size,
@@ -415,14 +521,21 @@ class NeuralFlowModel(nn.Module):
         self.lat_params = None
         self.scale = nn.Parameter(torch.ones(1) * 1e-1)
         self.latent_sequence=None
+
+        # precomputed priors
+        self.basis_params=None
+        self.std_dev_params=None
+        
+
         # self.scale = nn.Parameter(torch.ones(1))
         
 
     def add_encoder(self, encoder):
         self.encoder = encoder
 
-    def add_lat_params(self, lat_params):
-        self.lat_params = lat_params
+    def add_lat_params(self, lat_params, para_name):
+        # self.lat_params = lat_params
+        setattr(self, para_name, lat_params)
 
     def get_lat_params(self, idx):
         assert self.lat_params is not None
@@ -451,13 +564,6 @@ class NeuralFlowModel(nn.Module):
         self.latent_seq_weight = (
             self.latent_seq_len / self.latent_seq_len_sum[:, None]
         )  # [batch, nsteps-1]
-
-
-        # print("show self.latent_seq_weight!!!:",self.latent_seq_weight)#[1,1]
-        # show self.latent_seq_weight!!!: tensor([[1.],[1.]], device='cuda:0')
-
-    
-
         self.latent_seq_bins = torch.cumsum(
             self.latent_seq_weight, dim=1
         )  # [batch, nsteps-1]
@@ -468,10 +574,6 @@ class NeuralFlowModel(nn.Module):
         self.latent_seq_bins = torch.cat(
             [torch.zeros([bs, 1], device=dev), self.latent_seq_bins], dim=1
         )  # [batch, nsteps]
-
-
-        # print("show self.self.self.latent_seq_bins!!!:",self.latent_seq_bins)#[1,1]
-
 
         self.latent_updated = True
 
@@ -497,8 +599,8 @@ class NeuralFlowModel(nn.Module):
         latent_val = latent_t0 + alpha.unsqueeze(-1) * (latent_t1 - latent_t0)
 
 
-        print("check grad of latent_val:",latent_val.requires_grad) # False
-        exit()
+        # print("check grad of latent_val:",latent_val.requires_grad) # False
+        # exit()
 
         # print("check grad of latent_t0:",latent_t0.requires_grad) # False
         # print("check val of latent_t0_n:",latent_t0_n) 
@@ -602,8 +704,11 @@ class NeuralFlowModel(nn.Module):
             with torch.set_grad_enabled(True):
 
                 points.requires_grad_(True)
-                latent_val, latent_dir, sign = self.latent_at_t(t)
-                # print("show self.scale:",self.scale)
+                latent_val, latent_dir, sign = self.latent_at_t(t) # latent_at_t_two_time_step
+                # latent_val, latent_dir, sign = self.latent_at_t_two_time_step(t) # latent_at_t_two_time_step
+                # # print("show self.scale:",self.scale)
+                # print(" latent_val grad:",latent_val.requires_grad)
+                # exit()
                 sign = sign[:, None, None] * self.scale
                 if self.symm_dim is None:
                     # print("symm_dim show points grad:",points.requires_grad)
@@ -612,19 +717,24 @@ class NeuralFlowModel(nn.Module):
                     flow = symmetrize(self.flow_net, latent_val, points, self.symm_dim)
                 # Normalize velocity based on time space proportional to latent
                 # difference.
-                # print("before show flow:",flow)
-
-
+                # print("before show flow shape:",flow.shape) #[8, 1024, 3
                 # print("see self.latent_seq_len_sum[:, None, None]:",self.latent_seq_len_sum[:, None, None])
                 flow *= self.latent_seq_len_sum[:, None, None]
-                # print("show flow after :",flow)
+                # print("show flow shape  :",flow.shape)#torch.Size([8, 1024, 3])
+
+                # exit()
+
                 if not self.no_sign_net:
                     sign = self.sign_net(latent_dir)
                 flow_signed=flow * sign
+
+                # print("show flow_signed shape:",flow_signed.shape)# torch.Size([8, 1024, 3])
+                # exit()
             return flow_signed
         
         else:
-            latent_val, latent_dir, sign = self.latent_at_t(t)
+            latent_val, latent_dir, sign = self.latent_at_t(t) # latent_at_t_two_time_step
+            # latent_val, latent_dir, sign = self.latent_at_t_two_time_step(t) # latent_at_t_two_time_step
             sign = sign[:, None, None] * self.scale
             if self.symm_dim is None:
                 # print("symm_dim show points grad:",points.requires_grad)
@@ -642,7 +752,7 @@ class NeuralFlowModel(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, args):
+    def __init__(self, args, shape_mask_clusters=None):
         super(Model,self).__init__()
 
         self.method = args.solver
@@ -654,41 +764,92 @@ class Model(nn.Module):
         self.no_sign_net= True # try sign net 
         self.deformer_nf= args.deformer_nf
 
+        # self.shape_mask_clusters= shape_mask_clusters
+
+        self.lvl_detail=2
+
 
         self.odeint = odeint_adjoint if args.adjoint else odeint_regular
+        self.odeint_high_freq = odeint_adjoint if args.adjoint else odeint_regular
+
+        
+
         self.__timing = torch.from_numpy(
             np.array([0.0, 1.0]).astype("float32")
         ).to(args.device)
         self.return_waypoints = args.return_waypoints
+        # return_waypoints: bool, return intermediate waypoints along timing.
+
         self.use_latent_waypoints = args.use_latent_waypoints
         self.rtol = args.rtol
         self.atol = args.atol
         self.via_hub = args.via_hub
         self.symm_dim = (2 if args.symm else None)
 
-
-        self.latent_dim=64
-        self.latent_en= nn.Sequential(
+        self.num_part_points = args.num_input_points 
+        self.latent_dim=args.lat_dims
+        self.latent_en_shared_layers= nn.Sequential(
             nn.Linear(self.latent_dim, self.latent_dim),
             nn.LayerNorm(self.latent_dim),  # Normalize scale
             nn.LeakyReLU(),
             nn.Linear(self.latent_dim, self.latent_dim),
+            nn.LeakyReLU(),
         )
 
-        self.net = NeuralFlowModel(
-            dim=3,
-            latent_size=self.lat_dims,
-            f_nlayers=4,
-            f_width=self.deformer_nf,
-            s_nlayers=2,
-            s_width=5,
-            arch=self.arch,
-            conformal=self.conformal,
-            nonlinearity=self.nonlinearity,
-            no_sign_net=self.no_sign_net,
-            divfree=False,
-            symm_dim=(2 if args.symm else None),
+        self.theta_refine_head = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim),
+            nn.LayerNorm(self.latent_dim),
+            nn.LeakyReLU(),
+            nn.Linear(self.latent_dim, self.latent_dim)
         )
+
+        self.theta_condition_head = nn.Sequential(
+            nn.Linear(self.latent_dim, self.latent_dim),
+            nn.LayerNorm(self.latent_dim),
+            nn.LeakyReLU(),
+            nn.Linear(self.latent_dim, self.latent_dim)
+        )
+
+        # theta--> theta1_for_transformation + theta_for_deformation 
+
+        
+
+        self.net = torch.nn.ModuleList([])
+
+        for i in range(self.lvl_detail):
+
+            self.net.append(
+                NeuralFlowModel(
+                dim=3,
+                latent_size=self.lat_dims,
+                f_nlayers=4,
+                f_width=self.deformer_nf,
+                s_nlayers=2,
+                s_width=5,
+                arch=self.arch,
+                conformal=self.conformal,
+                nonlinearity=self.nonlinearity,
+                no_sign_net=self.no_sign_net,
+                divfree=False,
+                symm_dim=(2 if args.symm else None),
+                    )                    
+                )
+
+        # self.net = NeuralFlowModel(
+        #     dim=3,
+        #     latent_size=self.lat_dims,
+        #     f_nlayers=4,
+        #     f_width=self.deformer_nf,
+        #     s_nlayers=2,
+        #     s_width=5,
+        #     arch=self.arch,
+        #     conformal=self.conformal,
+        #     nonlinearity=self.nonlinearity,
+        #     no_sign_net=self.no_sign_net,
+        #     divfree=False,
+        #     symm_dim=(2 if args.symm else None),
+        # )
+       
         if self.symm_dim is not None:
             if not (isinstance(self.symm_dim, int) or isinstance(self.symm_dim, list)):
                 raise ValueError(
@@ -719,8 +880,57 @@ class Model(nn.Module):
     def add_encoder(self, encoder):
         self.net.add_encoder(encoder)
 
-    def add_lat_params(self, lat_params):
-        self.net.add_lat_params(lat_params)
+
+    def basis_transformed(self, refine_theta_en, points):
+
+        """
+        
+        points: [batch, num_points, dim], the source points
+
+        """
+
+        basis_params= self.net[0].basis_params.to(points.device)
+        std_dev_params = self.net[0].std_dev_params.to(points.device)
+        # print("show basis_params shape:",basis_params.shape)#  (3072, 64)
+        # print("show std_dev_params shape:",std_dev_params.shape)# (64, 1)
+        # print("show points shape:",points.shape)# torch.Size([2, 1024, 3])
+        std_dev_params = std_dev_params.transpose(1, 0).expand(points.shape[0], -1)  # [batch, dim, latent_size]
+        # std_dev_params= std_dev_params.to(points.device)
+        print("show std_dev_params shape:",std_dev_params.shape)# torch.Size([2, 64])
+
+        # torch.Size([2, 2, 64])
+        relative_theta = refine_theta_en[:, 1, :] - refine_theta_en[:, 0, :] 
+
+        relative_theta= relative_theta*std_dev_params
+        # print("show theta shape:",relative_theta.shape)#  show theta shape: torch.Size([2, 64])
+
+        trans= torch.matmul(relative_theta, basis_params.T).reshape(points.shape[0], self.num_part_points, 3)
+        # print("show trans shape:",trans.shape)#  ?
+
+        # points_trans = points + trans
+
+        points=  points + trans
+
+        # print("show points",points_trans.shape)
+
+        # print("show basis_params",basis_params.shape)
+        # print("show std_dev_params",std_dev_params.shape)
+        # exit()
+        # data_proj = self.mean + np.matmul(theta.transpose(1, 0), evecs.transpose(1, 0))
+        # data_proj = data_proj.reshape(-1, 3)
+        #  self.mean= data_proj - np.matmul(theta.transpose(1, 0), evecs.transpose(1, 0))
+
+        return points
+
+    def add_lat_params(self, lat_params, para_name):
+
+        for i in range(self.lvl_detail):
+            self.net[i].add_lat_params(lat_params,para_name)
+
+        # self.net.add_lat_params(lat_params,para_name)
+
+    # def add_model_params(self, lat_params, para_name):
+    #     setattr(self, para_name, lat_params)
 
     def get_lat_params(self, idx):
         return self.net.get_lat_params(idx)
@@ -764,67 +974,118 @@ class Model(nn.Module):
         
         
 
-
-
         points = points.requires_grad_(True)
-        latent_sequence = latent_sequence.requires_grad_(True)
+        # latent_sequence = latent_sequence.requires_grad_(False) # why? should be false?
+        # print("show points points shape:",points.shape)# 8, 1024, 3
 
 
+        
+        # print("see shape basis_params_evecs:",self.net.basis_params.shape)#  (3072, 64)
+        # print("see shape theta_params_std_dev:",self.net.std_dev_params.shape)# (64, 1)
         # Integrate a pre-Computed PCA Basis into the deformation flow field
 
         
         # print("see latent_sequence:",latent_sequence.shape)# torch.Size([2, 2, 64])
+        # print("see latent_sequence val:",latent_sequence)# torch.Size([2, 2, 64])
         is_nonzero = torch.any(latent_sequence != 0, dim=-1)
         encoded = torch.zeros_like(latent_sequence)
-        encoded[is_nonzero] = self.latent_en(latent_sequence[is_nonzero])
-        
- 
-        waypoints = self.net.update_latents(latent_sequence)
+        # refine_theta_en = torch.zeros_like(latent_sequence)
+        condition_theta_en = torch.zeros_like(latent_sequence)
+        encoded[is_nonzero] = self.latent_en_shared_layers(latent_sequence[is_nonzero])
+        condition_theta_en[is_nonzero]=self.theta_condition_head(encoded[is_nonzero])
+    
+
+
+        waypoints = self.net[0].update_latents(condition_theta_en)
+
 
         # print("see waypoints shape:",waypoints.shape) #  torch.Size([8, 2])
         # print("see waypoints values:",waypoints) #  torch.Size([8, 2])
-        
+        # print("show device of waypoints:",points.device)
+        # print("show device of refine_theta_en:",refine_theta_en.device) # refine_theta_en, points 
+        points_basis_transformed= self.basis_transformed(latent_sequence, points ) # points are source points---> transformed points
+        # print("show points_basis_transformed grad:",points_basis_transformed.requires_grad)# torch.Size([2, 1024, 3])
+        # print("show points_basis_transformed shape:",points_basis_transformed.shape)# torch.Size([2, 1024, 3])
+        # exit()
+        # #vis o3d
+        # pcd = o3d.geometry.PointCloud()
+        # pcd.points = o3d.utility.Vector3dVector(points_basis_transformed[0].detach().cpu().numpy())
+        # o3d.visualization.draw_geometries([pcd])
+
+
+        # pcd2= o3d.geometry.PointCloud()
+        # pcd2.points = o3d.utility.Vector3dVector(points_basis_transformed[1].detach().cpu().numpy())
+        # o3d.visualization.draw_geometries([pcd2])
+        # exit()
+
+
 
         if self.use_latent_waypoints:
             timing = waypoints[0]
         else:
             timing = self.timing
 
-        timing = self.timing.clone().requires_grad_(True)
-        # print("see timing vals:",timing)# [0., 1.]
+        # print("show timing grad", timing.requires_grad)
         points_transformed = self.odeint(
-            self.net,
-            points,
+            self.net[0],
+            points_basis_transformed, # points,
             timing,
             method=self.method,
             rtol=self.rtol,
             atol=self.atol,
-            # adjoint_options={'requires_grad': True}
+        )
+
+        # self.odeint_high_freq 
+
+        _ = self.net[1].update_latents(condition_theta_en)
+
+        points_transformed_2 = self.odeint_high_freq(
+            self.net[1],
+            points_transformed[-1], # points,
+            timing,
+            method=self.method,
+            rtol=self.rtol,
+            atol=self.atol,
         )
 
 
-        # print("show waypoints requires_grad:", waypoints.requires_grad) # True
-        # print("show points_transformed requires_grad:", points_transformed.requires_grad)# True
-        # print("show points requires_grad:", points.requires_grad) # True
-        # print("show timing grad:", timing.requires_grad) # True
+       
+        return points_transformed_2[-1], points_basis_transformed
 
 
-        deform_magnitude = torch.norm(points_transformed - points).item()
-        print(f"Deformation magnitude: {deform_magnitude}")
-        # print(f"Flow network grad norm: {torch.norm(next(self.net.flow_net.parameters()).grad).item()}"
-        # exit()
 
 
-        deform_abs = torch.mean(
-                torch.norm(points - points_transformed, dim=-1)
-            )
-        print("deform_abs deformation!",deform_abs)
-        if deform_abs < 1e-6:
-            print("no deformation!")
-            exit()
+ # print("show waypoints requires_grad:", waypoints.requires_grad) # True
+# print("show points_transformed requires_grad:", points_transformed.requires_grad)# True
+# print("show points requires_grad:", points.requires_grad) # True
+# print("show timing grad:", timing.requires_grad) # True
 
-        # exit()
-        if self.return_waypoints:
-            return points_transformed
-        else:
-            return points_transformed[-1]
+
+# deform_magnitude = torch.norm(points_transformed - points).item()
+# print(f"Deformation magnitude: {deform_magnitude}")
+# print("show points_transformed shape :", points_transformed.shape)
+# # print(f"Flow network grad norm: {torch.norm(next(self.net.flow_net.parameters()).grad).item()}"
+# exit()
+
+
+# deform_abs = torch.mean(
+#         torch.norm(points - points_transformed, dim=-1)
+#     )
+# print("deform_abs deformation!",deform_abs)
+# if deform_abs < 1e-6:
+#     print("no deformation!")
+#     exit()
+
+
+# print("show points_transformed no -1 shape:",points_transformed.shape)
+# shape: torch.Size([2, 8, 1024, 3])
+
+# exit()
+# if self.return_waypoints:
+#     return points_transformed
+#     # print("show points_transformed shape:",points_transformed.shape)
+# else:
+#     # print("show points_transformed[-1] shape:",points_transformed[-1].shape)# torch.Size([2, 8, 1024, 3])
+#     # intermediate= points_transformed[0]
+#     # exit()
+#     return points_transformed[-1], points_basis_transformed

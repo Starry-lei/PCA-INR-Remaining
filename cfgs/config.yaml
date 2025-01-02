@@ -4,10 +4,12 @@ work_dir: exp_shapeNet_chair_leg/
 batch_size: 4
 model_name: displacement_flow # displacement_flow # dgcnn_transfomer
 device: cuda:0
-epochs: 4000
+epochs: 2000
 
-lat_dims: 64
-deformer_nf: 64
+lat_dims: 10 # 64
+num_input_points: 1024
+deformer_nf: 64 # 80? 96? 128?
+n_clusters: 4
 solver: 'dopri5'
 adjoint: True
 arch: "imnet"
@@ -19,16 +21,16 @@ symm: False
 return_waypoints: False
 use_latent_waypoints: False
 
-input_size: 3
-hidden_size: 512
-num_layers: 3
-output_size: 3
-pca_dim: 64
-num_mapping_layers: 2
+# input_size: 3
+# hidden_size: 512
+# num_layers: 3
+# output_size: 3
+# pca_dim: 64
+# num_mapping_layers: 2
 
-num_input_points: 1024
-latent_dim: 128
-num_output_points: 1024
+
+# latent_dim: 128
+# num_output_points: 1024
 
 
 loss: cd_t

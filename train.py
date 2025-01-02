@@ -1,6 +1,7 @@
 
 
 from dataset.data_loader import PCDataset
+from dataset.data_loader import PCDValataset
 import argparse
 import munch
 import datetime
@@ -32,7 +33,9 @@ def calc_cd(output, gt):
 
 output_dir= "./output_dir"
 wandb.init(project="PCA_flow_displacement", entity="thesis_lei")
-# PCA-Conditioned Residual SIREN MLP
+
+
+
 
 # the input is PCA reduced 3D point cloud and the corresponding projection parameters, the output is the 3D point cloud before PCA reduction
 # I would like to learn a residual prediction model to predict the residual between the PCA reduced 3D point cloud and the original 3D point cloud
@@ -99,7 +102,9 @@ def train(args):
     num_epochs = args.epochs
 
     dataset_train = PCDataset(args, 'train')
-    dataset_val = PCDataset(args, 'val')
+    # dataset_val = PCDataset(args, 'val')
+    dataset_val= PCDValataset(args, 'val', global_normalization=dataset_train.global_normalization, mean_shape=dataset_train.normalized_mean_shape_pcd, precomputed_ssm=dataset_train.precomputed_ssm)
+
 
     dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
     dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
@@ -120,7 +125,11 @@ def train(args):
     device = args.device
 
     model_module = importlib.import_module('.%s' % args.model_name, 'models')
-    model = model_module.Model(args)
+    
+
+    shape_mask_clusters = dataset_train.mask_clusters
+    
+    model = model_module.Model(args, shape_mask_clusters=shape_mask_clusters)
     model = model.to(device) 
 
     if hasattr(model_module, 'weights_init'):
@@ -143,25 +152,52 @@ def train(args):
     betas = args.betas.split(',')
     betas = (float(betas[0].strip()), float(betas[1].strip()))
 
+
+    
     optimizer = getattr(optim, args.optimizer)  
     optimizer = optimizer(model.parameters(), lr=lr, weight_decay=args.weight_decay, betas=betas)
     
-    # optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min",factor=0.1, patience=10, verbose=True, min_lr=1e-6)
 
-    model, optimizer = accelerator.prepare(model, optimizer)
+  
+
+    model, optimizer, scheduler = accelerator.prepare(model, optimizer, scheduler)
 
 
     the_pca_mean_shape = torch.from_numpy(np.array(dataset_train.normalized_mean_shape_pcd.points)).float().to(device)
     the_pca_mean_shape = the_pca_mean_shape.unsqueeze(0)
     print("shape of the_pca_mean_shape:", the_pca_mean_shape.shape) # shape of the_pca_mean_shape: torch.Size([1,1024, 3])
     
+    # add precomputed PCA and initialize it here
+    basis_params_evecs= dataset_train.basis_evecs 
+    theta_params_std_dev= dataset_train.theta_std_dev
+
+    
+
+    print("see shape basis_params_evecs:",basis_params_evecs.shape)#  (3072, 64)
+    print("see shape theta_params_std_dev:",theta_params_std_dev.shape)# (64, 1)
+
+    basis_params = torch.nn.Parameter(torch.from_numpy(basis_params_evecs).float().to(device), requires_grad=False, )
+    std_dev_params= torch.nn.Parameter(torch.from_numpy(theta_params_std_dev).float().to(device=device), requires_grad=False,)
+    
+    # 还需要优化basis_params和std_dev_params两个先验信息吗？
+
+    model.add_lat_params(basis_params, 'basis_params')
+    model.add_lat_params(std_dev_params, 'std_dev_params')
+    # model.add_model_params(shape_mask_clusters, 'shape_mask_clusters')
+
+
+
+    # load params:
+
+
+
+
+
+
     criterion = torch.nn.MSELoss(reduction='mean') # hybrid_loss with chamfer_loss # reduction='none'
     
-#     LOSSES = {
-#     "l1": torch.nn.L1Loss(),
-#     "l2": torch.nn.MSELoss(),
-#     "huber": torch.nn.SmoothL1Loss(),
-# }
+
 
     bug_handling= "./bug_handling"
     loss_scaler= 1024.0
@@ -171,11 +207,13 @@ def train(args):
         model.train()
         total_loss = 0
         tqdm_train_loader = tqdm(dataloader_train, desc=f"Epoch {epoch + 1}/{num_epochs} Training")
-        for pca_recon, pca_theta, pca_input in tqdm_train_loader:
-
+        for name, pca_theta, pca_input in tqdm_train_loader:
+            # print("see name:",name)
             pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1)# # torch.Size([4, 1024, 3])
             # print("shape of pca_theta:", pca_theta.shape) # torch.Size([4, 1, 64])
             pca_theta= pca_theta.squeeze(1)
+
+
             # print("shape of pca_input:", pca_input.shape) # torch.Size([4, 1024, 3])
             mean_latents= torch.zeros_like(pca_theta)
             # batch together source and target shape for two-way loss training
@@ -188,9 +226,9 @@ def train(args):
 
             # print("device of source_target_points:",source_target_points.device) # cuda0
 
-            latent_norm= pca_theta-mean_latents
-            latent_norm_val= torch.mean(latent_norm, dim=-1)
-            print("mean of lantent change:",latent_norm_val)# gt_deform_abs
+            # latent_norm= pca_theta-mean_latents
+            # latent_norm_val= torch.mean(latent_norm, dim=-1)
+            # print("mean of lantent change:",latent_norm_val)# gt_deform_abs
 
 
             gt_deform_abs = torch.mean(
@@ -201,27 +239,36 @@ def train(args):
 
 
 
-            # exit()
+
             latent_seq = torch.stack(
                 [source_target_latents, target_source_latents], dim=1
             )
             print("show latent_seq:",latent_seq.shape)            
-            deformed_pts = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
+            deformed_pts, points_transformed = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
   
 
             print("show deformed_pts:",deformed_pts.requires_grad)
+            print("show deformed_pts shape:",deformed_pts.shape)
+            print("show points_transformed shape:",points_transformed.shape)
 
             print("see epoch:",epoch_idx)
             print("see epoch % 100:",epoch_idx % 100)
-            if epoch_idx % 200 == 0:
+            if epoch_idx % 50 == 0:
+                points_transformed_vis= points_transformed[0]
                 deformed_pts_vis= deformed_pts[0]
                 deformed_pts_vis_np= deformed_pts_vis.detach().cpu().numpy()
+                points_transformed_vis_np= points_transformed_vis.detach().cpu().numpy()
                 deformed_pts_vis_np_pcd= o3d.geometry.PointCloud()
+                points_transformed_vis_np_pcd= o3d.geometry.PointCloud()
                 deformed_pts_vis_np_pcd.points=o3d.utility.Vector3dVector(deformed_pts_vis_np)
-                o3d.visualization.draw_geometries([deformed_pts_vis_np_pcd])
+                points_transformed_vis_np_pcd.points=o3d.utility.Vector3dVector(points_transformed_vis_np)
+                # o3d.visualization.draw_geometries([deformed_pts_vis_np_pcd])
+                # o3d.visualization.draw_geometries([points_transformed_vis_np_pcd])
                 # save the pcd:
                 pcd_path= os.path.join(bug_handling,str(epoch_idx)+"_deformed_pts_vis_np_pcd.ply" )
+                points_transformed_vis_np_pcd_path= os.path.join(bug_handling,str(epoch_idx)+"_points_transformed_vis_np_pcd.ply" )
                 o3d.io.write_point_cloud(pcd_path,deformed_pts_vis_np_pcd )
+                o3d.io.write_point_cloud(points_transformed_vis_np_pcd_path,points_transformed_vis_np_pcd )
 
 
 
@@ -246,6 +293,8 @@ def train(args):
             optimizer.step()
 
             total_loss += loss.item()
+
+            scheduler.step(loss)
 
             
             wandb.log({"train_loss": loss.item()}, step=global_step)
@@ -287,7 +336,7 @@ def train(args):
                     [source_target_latents, target_source_latents], dim=1
                 )
 
-                deformed_pts = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
+                deformed_pts, points_transformed = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
                 # cd_l1, loss_cd_l2= calc_cd(deformed_pts, target_source_points)
                 # loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
                 loss_mse= loss_scaler* criterion(deformed_pts, target_source_points)
