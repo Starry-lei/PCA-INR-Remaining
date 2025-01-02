@@ -6,7 +6,7 @@
 #SBATCH --mem=30G
 #SBATCH --exclude=node[11,12]
 #SBATCH --constraint="GPU_GEN:AMPERE|GPU_GEN:TURING"
-#SBATCH --time=36:30:00
+#SBATCH --time=48:30:00
 #SBATCH --mail-user="ge23yat@mytum.de"
 #SBATCH --mail-type=BEGIN,END
 #SBATCH --output=/home/stud/chengl/storage/user/PCA-INR-Remaining/Training/slurm_output/slurm-%j.out
@@ -56,5 +56,5 @@ sleep 24h
 
 # scancel 1273195
 # sbatch train.sbatch
-# srun --jobid 1310026 --pty tmux a -t INR
+# srun --jobid 1310259 --pty tmux a -t INR
 #  squeue -u chengl

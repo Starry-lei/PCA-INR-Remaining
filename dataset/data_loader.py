@@ -112,7 +112,9 @@ class PCDataset(data.Dataset):
 
         return (aabb_center, scale_factor)
 
-    def denormalize_for_inference(self, pcd, scale_factors):
+    def denormalize_for_inference(self, pcd):
+
+        scale_factors= self.get_global_normalization()
     
         aabb_center= scale_factors[0]
         scale_factor = scale_factors[1]
@@ -149,7 +151,7 @@ class PCDataset(data.Dataset):
 
 
 
-        return pca_recon, pca_rep, pca_input
+        return pca_recon, pca_rep, pca_input,name
 
     def __len__(self):
         return len(self.pca_input_points_sets)

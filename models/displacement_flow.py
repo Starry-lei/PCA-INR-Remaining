@@ -385,11 +385,12 @@ class NeuralFlowModel(nn.Module):
         symm_dim=None,
     ):
         super(NeuralFlowModel, self).__init__()
-        if conformal:
-            model = ConformalDeformationFlowNetwork
+        # if conformal:
+        #     model = ConformalDeformationFlowNetwork
 
-        else:
-            model = DeformationFlowNetwork
+        # else:
+        model = DeformationFlowNetwork
+        
         self.no_sign_net = no_sign_net
         self.flow_net = model(
             dim=dim,
@@ -528,7 +529,7 @@ class Model(nn.Module):
         self.method = args.solver
         self.conformal = False
         self.lat_dims= args.lat_dims
-        self.arch = args.arch
+        self.arch = args.arch # arch: "imnet"
         self.adjoint = args.adjoint
         self.nonlinearity= args.nonlin
         self.no_sign_net= True
@@ -549,7 +550,7 @@ class Model(nn.Module):
         self.net = NeuralFlowModel(
             dim=3,
             latent_size=self.lat_dims,
-            f_nlayers=4,
+            f_nlayers=3,
             f_width=self.deformer_nf,
             s_nlayers=2,
             s_width=5,
@@ -618,7 +619,7 @@ class Model(nn.Module):
             self.return_waypoint.
         """
 
-        #latent_sequence: shape torch.Size([8, 2, 64])
+        # latent_sequence: shape torch.Size([8, 2, 64])
 
         if latent_sequence.dtype == torch.long:
             latent_sequence = self.get_lat_params(
@@ -645,6 +646,10 @@ class Model(nn.Module):
         else:
             timing = self.timing
 
+        # print("see timing shape:",timing.shape) # [2]
+        # print("see timing values:",timing) # tensor([0., 1.], device='cuda:6')
+
+        # exit()
 
         points_transformed = self.odeint(
             self.net,

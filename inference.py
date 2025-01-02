@@ -5,6 +5,7 @@ import argparse
 import munch
 import datetime
 import os
+import numpy as np
 import yaml
 import torch
 import random
@@ -20,6 +21,16 @@ from torch.nn.utils import clip_grad_norm_
 from torch.cuda.amp import GradScaler, autocast
 
 import open3d as o3d
+
+import pytorch3d
+from pytorch3d import loss
+
+
+def calc_cd(output, gt):
+    cd_l1, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=1, point_reduction='mean')
+    # cd_l2, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=2, batch_reduction=None, point_reduction='sum')
+    cd_l2=_
+    return cd_l1, cd_l2
 
 output_dir= "./output_dir"
 # wandb.init(project="PCA_Remainig", entity="thesis_lei")
@@ -72,7 +83,8 @@ def train(args):
 
 
     # dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
-    dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
+    # dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
+    dataloader_val = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
     # logging.info('Length of train dataset:%d', len(dataloader_train))
     logging.info('Length of validation dataset:%d', len(dataloader_val))
 
@@ -100,7 +112,7 @@ def train(args):
         model.apply(model_module.weights_init)
 
 
-    best_pth= "best_model_weights.pth"
+    best_pth= "best_model_weights.pth" # best_model_weights
 
     if os.path.exists(best_pth):
         model.load_state_dict(torch.load(best_pth))
@@ -110,22 +122,71 @@ def train(args):
 
     model.eval()
     best_val_loss = float('inf')   
+    save_path= "./testShapes"
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
 
     # optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    the_pca_mean_shape = torch.from_numpy(np.array(dataset_train.normalized_mean_shape_pcd.points)).float() #.to(device)
+    the_pca_mean_shape = the_pca_mean_shape.unsqueeze(0)
+    print("shape of the_pca_mean_shape:", the_pca_mean_shape.shape) # shape of the_pca_mean_shape: torch.Size([1,1024, 3])
     
-    creterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
+    
+    criterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
     global_step = 0
     with torch.no_grad():
         for epoch in range(num_epochs):
             total_loss = 0
             tqdm_train_loader = tqdm(dataloader_val, desc=f"Epoch {epoch + 1}/{num_epochs} Testing")
-            for pca_recon, pca_rep, pca_input in tqdm_train_loader:
+            for idx,  data in enumerate(tqdm_train_loader):
+                pca_recon, pca_theta, pca_input, name=data
 
-                deformed_points = model(pca_recon, pca_rep)
+                pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1).to(pca_input.device) # # torch.Size([4, 1024, 3])
+                # print("shape of pca_theta:", pca_theta.shape) # torch.Size([4, 1, 64])
+                pca_theta= pca_theta.squeeze(1)
+                # print("shape of pca_input:", pca_input.shape) # torch.Size([4, 1024, 3])
+                mean_latents= torch.zeros_like(pca_theta)
+                # batch together source and target shape for two-way loss training
+                source_target_points = torch.cat([pca_mean_shape, pca_input], dim=0)
+                target_source_points = torch.cat([pca_input, pca_mean_shape], dim=0)
+                # print("see source_target_points shape :", source_target_points.shape)#  torch.Size([8, 1024, 3])
+                source_target_latents = torch.cat([mean_latents, pca_theta], dim=0)
+                target_source_latents = torch.cat([pca_theta, mean_latents], dim=0)
+                # print("see target_source_latents shape :", target_source_latents.shape)#  torch.Size([8, 64])
 
-                loss = 100.0*creterion(deformed_points, pca_input)
+                # print("device of source_target_points:",source_target_points.device) # cuda0
+                latent_seq = torch.stack([source_target_latents, target_source_latents], dim=1)
+
+                
+                deformed_points = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
+                # print("see latent_seq shape :", latent_seq.shape)# torch.Size([8, 2, 64])
+                # print("see deformed_pts shape :", deformed_pts.shape)
+                cd_l1, loss_cd_l2= calc_cd(deformed_points, target_source_points)
+
+                # print("show cd_l1:",cd_l1)
+                # exit()
+                # loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
+                # y  = M*Theta+Mean --> # y = f_para(Theta, Mean)
+
+
+
+                # we use f to work as a better M
+                # displacement = deformation= f_para(mean, theta)
+                
+                loss_mse= 100.0*criterion(deformed_points, target_source_points)
+                loss_cd_l1= cd_l1
+                # loss_reg= reg_loss?
+                # order regularization?
+                # now, it overfits
+    
+                # loss = loss_cd+loss_mse
+                loss = loss_mse+ loss_cd_l1
+
 
                 print("val of loss:", loss) #  0.0023---> real loss:0.000023
+                print("val of loss_mse:", loss_mse) #  0.0023---> real loss:0.000023
+                print("val of loss_cd_l1:", loss_cd_l1) #  0.0023---> real loss:0.000023
 
 
                 print("shape of deformed_points:", deformed_points.shape) # output: torch.Size([1, 1024, 3])
@@ -133,12 +194,33 @@ def train(args):
                 pcd_1= o3d.geometry.PointCloud()
                 pcd_1.points = o3d.utility.Vector3dVector(deformed_points[0].cpu().numpy())
 
-                denormalized_deformed_points = dataset_val.denormalize_for_inference(pcd_1, global_normalization)
+                batch_size= 2*len(deformed_points)
 
-                # save the point cloud
-                o3d.io.write_point_cloud("denormalized_deformed_points.ply", denormalized_deformed_points)
+                for chk_idx in range(0, int(0.1*batch_size)):
 
-                exit()
+                    pcd_1= o3d.geometry.PointCloud()
+                    pcd_1.points=o3d.utility.Vector3dVector(deformed_points[chk_idx].cpu().numpy())
+                    pca_input_res= o3d.geometry.PointCloud()
+                    pca_input_res.points= o3d.utility.Vector3dVector(pca_input[chk_idx].cpu().numpy())
+
+                    denormalized_deformed_points = dataset_val.denormalize_for_inference(pcd_1)
+                    gt_pc_points = dataset_val.denormalize_for_inference(pca_input_res)
+
+                    # denormalized_deformed_point_pcd= o3d.geometry.PointCloud()
+                    # denormalized_deformed_point_pcd.points=o3d.utility.Vector3dVector(denormalized_deformed_points)
+
+                    # gt_pc_points_pcd= o3d.geometry.PointCloud()
+                    # gt_pc_points_pcd.points= o3d.utility.Vector3dVector(gt_pc_points)
+
+                    deformed_path= os.path.join(save_path,"deformed_"+name[chk_idx]+".ply" )
+                    gt_path=  os.path.join(save_path,"gt_pc_"+name[chk_idx]+".ply")
+                    # save the point cloud
+                    o3d.io.write_point_cloud(deformed_path, denormalized_deformed_points)
+                    o3d.io.write_point_cloud(gt_path, gt_pc_points)
+
+                
+                if idx==2:
+                    exit()
 
                
 

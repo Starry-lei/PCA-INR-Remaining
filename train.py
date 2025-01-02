@@ -28,8 +28,9 @@ from pytorch3d import loss
 
 
 def calc_cd(output, gt):
-    cd_l1, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=1, point_reduction='sum')
-    cd_l2, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=2, batch_reduction=None, point_reduction='sum')
+    cd_l1, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=1, point_reduction='mean')
+    # cd_l2, _ = pytorch3d.loss.chamfer_distance(output, gt, norm=2, batch_reduction=None, point_reduction='sum')
+    cd_l2=_
     return cd_l1, cd_l2
 
 output_dir= "./output_dir"
@@ -184,13 +185,20 @@ def train(args):
     print("shape of the_pca_mean_shape:", the_pca_mean_shape.shape) # shape of the_pca_mean_shape: torch.Size([1,1024, 3])
     
     criterion = torch.nn.MSELoss() # hybrid_loss with chamfer_loss # reduction='none'
+    reg_loss= torch.nn.SmoothL1Loss()
+    # LOSSES = {
+    # "l1": torch.nn.L1Loss(),
+    # "l2": torch.nn.MSELoss(),
+    # "huber": torch.nn.SmoothL1Loss(),
+    # }
+    loss_scaler= 150.0
     global_step = 0
     for epoch in range(num_epochs):
         print(f"Starting epoch {epoch + 1}")
         model.train()
         total_loss = 0
         tqdm_train_loader = tqdm(dataloader_train, desc=f"Epoch {epoch + 1}/{num_epochs} Training")
-        for pca_recon, pca_theta, pca_input in tqdm_train_loader:
+        for pca_recon, pca_theta, pca_input, name in tqdm_train_loader:
 
             pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1).to(pca_input.device) # # torch.Size([4, 1024, 3])
             # print("shape of pca_theta:", pca_theta.shape) # torch.Size([4, 1, 64])
@@ -206,24 +214,62 @@ def train(args):
             # print("see target_source_latents shape :", target_source_latents.shape)#  torch.Size([8, 64])
 
             # print("device of source_target_points:",source_target_points.device) # cuda0
-            # exit()
-            latent_seq = torch.stack(
-                [source_target_latents, target_source_latents], dim=1
-            )
+            latent_seq = torch.stack([source_target_latents, target_source_latents], dim=1)
 
             
             deformed_pts = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
             # print("see latent_seq shape :", latent_seq.shape)# torch.Size([8, 2, 64])
             # print("see deformed_pts shape :", deformed_pts.shape)
 
+
+            vis_idx= torch.randint(0, deformed_pts.shape[0], (3,))
+
+            deformed_pts_vis= deformed_pts[vis_idx]
+            # print("shape of deformed_pts_vis ",deformed_pts_vis.shape ) # torch.Size([3, 1024, 3])
+
+            deformed_pts_vis_np= deformed_pts_vis.detach().cpu().numpy()
+
+            # if accelerator.is_main_process:  # Only log from main process
+            #     accelerator.log({
+            #          "vis_points_1": wandb.Object3D(deformed_pts_vis_np[0]),  # First point cloud [1024, 3]
+            #         "vis_points_2": wandb.Object3D(deformed_pts_vis_np[1]),  # Second point cloud [1024, 3]
+            #         "vis_points_3": wandb.Object3D(deformed_pts_vis_np[2])   # Third point cloud [1024, 3]
+            #     })
+
+
+            if epoch % 10 == 0:  # Will visualize at epochs 0, 10, 20, 30, etc.
+                vis_idx = torch.randint(0, deformed_pts.shape[0], (3,))
+                deformed_pts_vis = deformed_pts[vis_idx]
+                deformed_pts_vis_np = deformed_pts_vis.detach().cpu().numpy()
+
+                if accelerator.is_main_process:
+                    log_dict = {}
+                    for i in range(3):
+                        log_dict[f"point_cloud_{i}_epoch_{epoch}"] = wandb.Object3D(deformed_pts_vis_np[i])
+                    
+                    # Log with current epoch as step
+                    accelerator.log(log_dict, step=epoch)
+
+
+
+
+
             cd_l1, loss_cd_l2= calc_cd(deformed_pts, target_source_points)
-            loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
-            loss_mse= criterion(deformed_pts, target_source_points)
-            # print("see cd_l1, cd_l2:",cd_l1, loss_cd_l2)            
-            # print("see loss_cd :", loss_cd)
-            # print("see loss_mse :", loss_mse)
-            # print("see loss shape :", loss)
-            loss = loss_cd+loss_mse
+
+           
+            # loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
+            # y  = M*Theta+Mean --> # y = f_para(Theta, Mean)
+            # we use f to work as a better M
+            # displacement = deformation= f_para(mean, theta)
+            
+            loss_mse= loss_scaler*criterion(deformed_pts, target_source_points)
+            loss_cd_l1= cd_l1
+            # loss_reg= reg_loss?
+            # order regularization?
+            # now, it overfits
+   
+            # loss = loss_cd+loss_mse
+            loss = loss_mse+ loss_cd_l1
 
 
             # loss = criterion(deformed_pts, target_source_points) # geometry aware?
@@ -261,6 +307,8 @@ def train(args):
             # wandb.log({"train_loss": loss.item()}, step=global_step)
 
             accelerator.log({"train_loss": loss.item()}, step=global_step)
+            accelerator.log({"loss_mse": loss_mse.item()}, step=global_step)
+            accelerator.log({"loss_cd_l1": loss_cd_l1.item()}, step=global_step)
 
             tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
             
@@ -281,10 +329,11 @@ def train(args):
             val_loss = 0
             num_batches= len(dataloader_val)
             # print("num_batches:", num_batches)# 86
-            for pca_recon, pca_theta, pca_input in dataloader_val:
+            for pca_recon, pca_theta, pca_input, name in dataloader_val:
 
                 # loss = creterion(model(pca_recon, pca_rep), pca_input)
-                pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1)# # torch.Size([4, 1024, 3])
+                # pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1)# # torch.Size([4, 1024, 3])
+                pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1).to(pca_input.device) # # torch.Size([4, 1024, 3])
                 pca_theta= pca_theta.squeeze(1)
                 mean_latents= torch.zeros_like(pca_theta)
                 # batch together source and target shape for two-way loss training
@@ -298,10 +347,28 @@ def train(args):
                 )
 
                 deformed_pts = model(source_target_points[..., :3], latent_seq)  # Not set to via_hub.
+                # cd_l1, loss_cd_l2= calc_cd(deformed_pts, target_source_points)
                 cd_l1, loss_cd_l2= calc_cd(deformed_pts, target_source_points)
-                loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
-                loss_mse= criterion(deformed_pts, target_source_points)
-                loss = loss_cd+loss_mse
+                # loss_cd= criterion(loss_cd_l2, torch.zeros_like(loss_cd_l2))
+
+
+
+          
+                
+                
+                loss_mse= loss_scaler*criterion(deformed_pts, target_source_points)
+
+
+                loss_cd_l1= cd_l1
+                # loss_reg= reg_loss?
+                # order regularization?
+                # now, it overfits
+                # loss = loss_cd+loss_mse
+                loss = loss_mse+ loss_cd_l1
+
+                
+                # loss = loss_cd+loss_mse
+                # loss = loss_mse
 
 
                 val_loss += loss.item()
@@ -310,42 +377,19 @@ def train(args):
             val_loss /= num_batches
 
         # wandb.log({"val_loss": val_loss,}, step=global_step)
-        accelerator.log({"val_loss": val_loss.item()}, step=global_step)
+        accelerator.log({"val_loss": val_loss}, step=global_step)
 
 
         global_step += 1
 
-
-        # Inside your training loop, after the validation step
-        # if epoch % 10 == 0:  # Log every 10 epochs
-        #     # Get a batch of validation data to visualize
-        #     val_batch = next(iter(dataloader_val))
-        #     pca_recon_val, pca_rep_val, pca_input_val = val_batch
-            
-        #     with torch.no_grad():
-        #         deformed_points_val = model(pca_recon_val, pca_rep_val)                
-        #         # Convert to numpy and take first 8 examples
-        #         deformed_points_np = deformed_points_val.cpu().numpy()[:8]  # shape: (8, 1024, 3)
-        #         target_points_np = pca_input_val.cpu().numpy()[:8]         # shape: (8, 1024, 3)
-                
-        #         # Create a dictionary to store all point clouds
-        #         point_clouds_dict = {}
-                
-        #         # Log all 8 shapes for both deformed and target point clouds
-        #         for i in range(8):
-        #             point_clouds_dict[f"deformed_shape_{i}_epoch_{epoch}"] = wandb.Object3D(deformed_points_np[i])
-        #             point_clouds_dict[f"target_shape_{i}_epoch_{epoch}"] = wandb.Object3D(target_points_np[i])
-                
-        #         # Log all point clouds at once
-        #         wandb.log(point_clouds_dict)
-
-
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), 'best_model_weights.pth')
-            wandb.log({"best_val_loss": best_val_loss})
+            if accelerator.is_main_process:
+                torch.save(accelerator.unwrap_model(model).state_dict(), 'best_model_weights.pth')
 
-        torch.save(model.state_dict(), 'latest_model_weights.pth')
+
+        if accelerator.is_main_process:
+            torch.save(accelerator.unwrap_model(model).state_dict(), 'latest_model_weights.pth')
 
             
 
