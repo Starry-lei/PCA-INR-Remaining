@@ -12,3 +12,16 @@ testShapes/
 bug_handling/
 bug_handling_un_symm/
 torchdiffeq-master/
+bug_handling copy/
+bug_handling_no_c2f/
+
+temp_folder/
+test.py
+test_pcd/
+latest_model_weights_deformnf_64.pth
+
+1aa07508b731af79814e2be0234da26c_interpolated_1.ply
+1aa07508b731af79814e2be0234da26c_interpolated_2.ply
+1aa07508b731af79814e2be0234da26c_interpolated_3.ply
+1aa07508b731af79814e2be0234da26c_interpolated_4.ply
+1aa07508b731af79814e2be0234da26c_interpolated_5.ply

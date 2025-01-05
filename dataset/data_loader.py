@@ -8,6 +8,7 @@ import numpy as np
 import os
 import open3d as o3d
 from glob import glob
+from torch.nn import functional as F
 from sklearn.preprocessing import StandardScaler
 from utils_ssm.SSM import *
 from utils_ssm.evaluation_utils import (
@@ -16,7 +17,7 @@ from utils_ssm.evaluation_utils import (
     get_test_point_cloud,
     save_point_cloud
 )
-from sklearn.cluster import KMeans, DBSCAN, SpectralClustering
+from sklearn.cluster import KMeans
 
 
 def load_points(file_path):
@@ -99,8 +100,6 @@ def cluster_points(points, method='kmeans', n_clusters=4, eps=0.5, min_samples=5
         clusterer = KMeans(n_clusters=n_clusters, random_state=42)
     elif method == 'dbscan':
         clusterer = DBSCAN(eps=eps, min_samples=min_samples)
-    elif method == 'spectral':
-        clusterer = SpectralClustering(n_clusters=n_clusters, random_state=42)
     else:
         raise ValueError("Method must be one of: 'kmeans', 'dbscan', 'spectral'")
 
@@ -127,6 +126,7 @@ class PCDataset(data.Dataset):
         
         self.data_files= sorted(os.listdir(self.data_path))
 
+        self.data_length = len(self.data_files)
 
 
 
@@ -231,6 +231,10 @@ class PCDataset(data.Dataset):
         # data_proj = self.mean + np.matmul(theta.transpose(1, 0), evecs.transpose(1, 0))
         # data_proj = data_proj.reshape(-1, 3)
         # exit()
+        num_interpolations = 5
+
+        max_loss= 0
+        self.names_loss ={}
 
         for index, normalzied_input in enumerate(self.pca_input_points_sets):
             # print("see shape of normalzied_input:",normalzied_input.shape)# (1024, 3)
@@ -238,17 +242,88 @@ class PCDataset(data.Dataset):
             # pcd_view = o3d.geometry.PointCloud()
             # pcd_view.points = o3d.utility.Vector3dVector(normalzied_input)
 
+            loss= F.mse_loss(torch.tensor(normalzied_input), torch.tensor(self.mean_shape), reduction='mean')
+       
+            if loss.item() > max_loss:
+                max_loss= loss.item()
+            self.names_loss[self.names[index]]= loss.item()
+
+
+
+
             theta_vector = self.precomputed_ssm.get_theta(normalzied_input, self.num_nodes)            
             # whiting/sphere
             theta_normalized = theta_vector / self.theta_std_dev
             self.pca_theta_sets.append(theta_normalized)
-            checkReconsPC = self.precomputed_ssm.theta_to_shape_norm(theta_vector, self.num_nodes)
+            # checkReconsPC = self.precomputed_ssm.theta_to_shape_norm(theta_vector, self.num_nodes)
+
+            # checkReconsPC_interpolated
+            # interpolated_vectors = []
+            # zero_vector= np.zeros_like(theta_normalized)
+            # for i in range(1, num_interpolations + 1):
+            #     alpha = i / (num_interpolations + 1)  # Interpolation factor
+            #     interpolated_vector = zero_vector + alpha * (theta_normalized - zero_vector)
+            #     interpolated_vectors.append(interpolated_vector)
+
+            # # Convert list to numpy array for better readability
+            # interpolated_vectors = np.array(interpolated_vectors)
+            # for idx, vec in enumerate(interpolated_vectors, 1):
+            #     print(f"Interpolated Vector {idx}: {vec}")
+            #     checkReconsPC = self.precomputed_ssm.theta_to_shape_norm(vec*self.theta_std_dev, self.num_nodes)
+            #     save_name= self.names[index]+"_interpolated_"+str(idx)
+            #     checkReconsPC_pcd = o3d.geometry.PointCloud()
+            #     checkReconsPC_pcd.points = o3d.utility.Vector3dVector(checkReconsPC)
+            #     checkReconsPC_pcd = self.denormalize_for_inference(checkReconsPC_pcd, self.global_normalization)
+            #     o3d.io.write_point_cloud(f"{save_name}.ply", checkReconsPC_pcd)
+            # exit()
+
+
+
 
             # pcd_view2 = o3d.geometry.PointCloud()
             # pcd_view2.points = o3d.utility.Vector3dVector(checkReconsPC)
             # o3d.visualization.draw_geometries([pcd_view,pcd_view2])
             # exit()
 
+        losses = np.array(list(self.names_loss.values())).reshape(-1, 1)
+        # Define percentile thresholds for 40/40/20 split
+        p40 = np.percentile(losses, 40)  # Easy threshold
+        p80 = np.percentile(losses, 80)  # Medium threshold
+        easy_samples = {}
+        medium_samples = {}
+        hard_samples = {}
+
+        for name, loss in self.names_loss.items():
+            if loss <= p40:
+                easy_samples[name] = loss
+            elif loss <= p80:
+                medium_samples[name] = loss
+            else:
+                hard_samples[name] = loss
+
+        # Print statistics
+        print(f"Total samples: {len(self.names_loss)}")
+        print(f"Easy samples: {len(easy_samples)} ({len(easy_samples)/len(self.names_loss)*100:.1f}%)")
+        print(f"Medium samples: {len(medium_samples)} ({len(medium_samples)/len(self.names_loss)*100:.1f}%)")
+        print(f"Hard samples: {len(hard_samples)} ({len(hard_samples)/len(self.names_loss)*100:.1f}%)")
+        # Print threshold values
+        print(f"\nThresholds:")
+        print(f"Easy-Medium threshold (40th percentile): {p40:.6f}")
+        print(f"Medium-Hard threshold (80th percentile): {p80:.6f}")
+        print(f"Max loss: {max_loss:.6f}")
+
+
+        # import matplotlib.pyplot as plt
+        # plt.figure(figsize=(10, 6))
+        # plt.hist(losses, bins=50, alpha=0.7)
+        # plt.axvline(p40, color='g', linestyle='--', label='40th percentile (Easy-Medium)')
+        # plt.axvline(p80, color='r', linestyle='--', label='80th percentile (Medium-Hard)')
+        # plt.xlabel('Loss Values')
+        # plt.ylabel('Frequency')
+        # plt.title('Distribution of Deformation Losses (40/40/20 split)')
+        # plt.legend()
+        # plt.show()
+        # exit()
 
         # print("see shape of pca_input_points_sets:",self.pca_input_points_sets_pca.shape)        
         # print("see shape of pca_input_points_sets_array_flat:",self.pca_input_points_sets_pca_flat.shape)       
@@ -309,6 +384,8 @@ class PCDataset(data.Dataset):
         pca_theta = torch.from_numpy(pca_theta).float()
         pca_theta = pca_theta.T
 
+        shape_idx= torch.tensor(index, dtype=torch.long)
+
         # print(pca_input.shape)
         # print(pca_recon.shape)
         # print(pca_theta.shape)
@@ -319,7 +396,7 @@ class PCDataset(data.Dataset):
 
 
 
-        return name, pca_theta, pca_input
+        return shape_idx, name, pca_theta, pca_input
 
     def __len__(self):
         return len(self.pca_input_points_sets)
@@ -469,7 +546,62 @@ class PCDValataset(data.Dataset):
 
     def __len__(self):
         return len(self.pca_input_points_sets)
-   
+
+
+class CurriculumPCDataset(PCDataset):
+    def __init__(self, args, set_type='train', phase='easy'):
+        super().__init__(args, set_type)
+        
+        # Calculate percentile thresholds for 40/40/20 split
+        self.losses = np.array(list(self.names_loss.values()))
+        self.p40 = np.percentile(self.losses, 40)  # Easy threshold
+        self.p80 = np.percentile(self.losses, 80)  # Medium threshold
+
+        self.data_length = len(self.names_loss)
+
+        # Create a list of (index, name, loss) tuples to preserve original indexing
+        indexed_data = [(i, name, loss) for i, (name, loss) in enumerate(self.names_loss.items())]
+        
+        # Create indices for each difficulty level while preserving original indices
+        self.easy_indices = [idx for idx, _, loss in indexed_data if loss <= self.p40]
+        self.medium_indices = [idx for idx, _, loss in indexed_data if self.p40 < loss <= self.p80]
+        self.hard_indices = [idx for idx, _, loss in indexed_data if loss > self.p80]
+        
+        # Verify the indices
+        # print(f"Easy indices range: {(self.easy_indices)}")
+        # print(f"Medium indices range: {(self.medium_indices)} ")
+        # print(f"Hard indices range: {(self.hard_indices)}")
+        # exit()
+        self.phase = phase
+        self.update_active_indices()
+    
+    def update_active_indices(self):
+        """Update active indices based on current phase"""
+        if self.phase == 'easy':
+            self.active_indices = self.easy_indices
+        elif self.phase == 'medium':
+            self.active_indices = self.easy_indices + self.medium_indices
+        elif self.phase == 'hard':
+            self.active_indices = self.easy_indices + self.medium_indices + self.hard_indices
+        else:
+            raise ValueError(f"Invalid phase: {self.phase}")
+    
+    def set_phase(self, phase):
+        """Update the training phase"""
+        self.phase = phase
+        self.update_active_indices()
+    
+    def __getitem__(self, index):
+        """Get item from active indices only"""
+        actual_index = self.active_indices[index]
+        return super().__getitem__(actual_index)
+    
+    def __len__(self):
+        """Return length of active dataset"""
+        return len(self.active_indices)
+
+
+
 
 
 class InferenceDataset(data.Dataset):
