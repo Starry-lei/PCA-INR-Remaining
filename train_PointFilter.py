@@ -28,7 +28,7 @@ import torch.nn.functional as F
 output_dir= "./output_dir"
 wandb.init(project="PCA_latent_denoiser", entity="thesis_lei")
 
-def log_point_clouds_grid( point_clouds, n_rows=2, n_cols=2):
+def log_point_clouds_grid( point_clouds, n_rows=2, n_cols=2, step= None):
     """
     Create a 4x6 grid of interactive 3D point clouds
     Args:
@@ -44,14 +44,14 @@ def log_point_clouds_grid( point_clouds, n_rows=2, n_cols=2):
             if idx < len(point_clouds):
                 html += "<td style='border: 1px solid gray; padding: 5px;'>"
                 # Log each point cloud directly
-                wandb.log({f"shape_{idx}": wandb.Object3D(point_clouds[idx])})
+                wandb.log({f"shape_{idx}": wandb.Object3D(point_clouds[idx])}, step=step)
                 html += f"<div style='width: 250px; height: 250px;'></div>"
                 html += f"<div style='text-align: center;'>Shape {idx}</div>"
                 html += "</td>"
         html += "</tr>"
     html += "</table>"
 
-    wandb.log({"point_clouds_layout": wandb.Html(html)})
+    wandb.log({"point_clouds_layout": wandb.Html(html)}, step=step)
 
 
 
@@ -180,17 +180,24 @@ def train(args):
         
         for data_tensors  in tqdm_train_loader:
 
-            shape_idx, name, pca_theta, pca_recon, pca_input, pca_noised_recon = data_tensors
+            shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon = data_tensors
             pca_noised_recon= pca_noised_recon.to(device)
             pca_input= pca_input.to(device)
-            pred, loss_mse = model(pca_noised_recon, pca_input)
+            gt_5k_points= gt_5k_points.to(device)
+
+            # print("show points shape of gt_5k_points:",gt_5k_points.shape)
+            # # torch.Size([4, 5000, 3])
+
+            # exit()
+            pred, loss_mse = model(pca_noised_recon, gt_5k_points)
             loss= loss_mse.mean()
             # print("show loss:",loss)
-            if epoch_idx % 10 == 0:
+            # exit()
+            if epoch_idx % 2 == 0:
                 predis_pred= pred[:4].detach().cpu().numpy()
                 print("show shape of predis_pred:",predis_pred.shape)# 4， 1024， 3
                 predis_pred[:,:, [1, 2]] = predis_pred[:,:, [2, 1]]
-                log_point_clouds_grid(predis_pred)
+                log_point_clouds_grid(predis_pred, step=global_step)
                
             print("see loss_mse:",loss.item())
             optimizer.zero_grad()
@@ -200,7 +207,7 @@ def train(args):
             optimizer.step()
             total_loss += loss.item()    
 
-            wandb.log({"train_loss": loss.item()})# , step=global_step
+            wandb.log({"train_loss": loss.item()}, step=global_step)# , step=global_step
             tqdm_train_loader.set_postfix(loss=f"{loss.item():.4f}")
 
 
@@ -209,21 +216,22 @@ def train(args):
             val_loss = 0
             num_batches= len(dataloader_val)
             # print("num_batches:", num_batches)# 86
-            for shape_idx, name, pca_theta, pca_recon, pca_input, pca_noised_recon in dataloader_val:
+            for shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon in dataloader_val:
                 pca_noised_recon= pca_noised_recon.to(device)
                 pca_input= pca_input.to(device)
-                pred, loss_mse = model(pca_noised_recon, pca_input)
+                gt_5k_points= gt_5k_points.to(device)
+                pred, loss_mse = model(pca_noised_recon, gt_5k_points)
                 loss= loss_mse.mean()
                 # loss = loss_mse
                 val_loss += loss.item()
             val_loss /= num_batches
 
 
-        wandb.log({"val_loss": val_loss,})# , step=global_step
+        wandb.log({"val_loss": val_loss,}, step=global_step)# , step=global_step
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), 'best_model_weights.pth')
-            wandb.log({"best_val_loss": best_val_loss})
+            wandb.log({"best_val_loss": best_val_loss}, step=global_step)
 
 
         global_step += 1

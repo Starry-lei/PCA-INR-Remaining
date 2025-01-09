@@ -15,6 +15,7 @@ import sys
 proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.join(proj_dir, "utils/Pointnet2.PyTorch/pointnet2"))
 from pointnet2_utils import grouping_operation
+from utils.model_utils import calc_cd
 
 criterion_mse = torch.nn.MSELoss(reduction='sum') # reduce=None #  with chamfer_loss reduction='sum': reduction='sum'
 def mean_flat(tensor):
@@ -22,6 +23,9 @@ def mean_flat(tensor):
     Take the mean over all non-batch dimensions.
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
+
+
+
 
 class Model(nn.Module):
     def __init__(self, args):
@@ -92,22 +96,20 @@ class Model(nn.Module):
 
         if is_training:
             # cd_p, cd_t = criterion_mse(pred, gt)
-            loss_mse = criterion_mse(pred, gt)
-            recon_loss=  mean_flat(loss_mse)
+            # loss_mse = criterion_mse(pred, gt)
+            cd_p, cd_t = calc_cd(pred, gt)
+
+
+            recon_loss = cd_t
+
+
+            # recon_loss=  mean_flat(loss_mse)
             
-            # if self.alpha == None:
-            #     self.alpha = 0
-            # if self.alpha == 0:
-            #     neigh_loss = 0
-            # else:
+
             neigh_loss = self.get_neighbor_loss(pred, 10)
 
-            recon_loss= recon_loss + self.alpha * mean_flat(neigh_loss)
-
-            # loss = recon_loss.mean() + self.alpha * neigh_loss.mean()
-            # loss = recon_loss.mean() 
-
-            return pred, recon_loss
+            loss= mean_flat(recon_loss) + self.alpha * mean_flat(neigh_loss)
+            return pred, loss
         else:
             # cd_p, cd_t = calc_cd(pred, gt)
             loss_mse = criterion_mse(pred, gt)

@@ -7,7 +7,7 @@ device: cuda:0
 epochs: 2000
 coarse_to_fine: False
 encoder: dgcnn
-alpha: 0.1
+alpha: 0.01
 lat_dims: 20 # 64
 lat_high_freq_dims: 8 # 64
 local_dim: 64

@@ -120,6 +120,7 @@ class PCDataset(data.Dataset):
         # run dataloader for train, then val set
 
         self.data_path = os.path.join(args.dataset, set_type+'_set/', "pca_input/") 
+        self.gt_points_path= os.path.join(args.dataset, set_type+'_set/', "gt_points/") 
         self.num_points= args.num_input_points # 1024 
         self.num_nodes = args.lat_dims # 64
         self.n_clusters= args.n_clusters # 4
@@ -193,6 +194,7 @@ class PCDataset(data.Dataset):
         print(f"Loading {set_type} data")
         print(self.data_path)# dataset/part_chair_leg_pca64
         self.pca_input_points_sets = []
+        self.gt_5k_points_sets = []
         self.pca_recon_points_sets = []
         self.pca_scales_sets = []
         self.pca_theta_sets= []
@@ -200,16 +202,24 @@ class PCDataset(data.Dataset):
 
 
         for file in self.data_files:
-            if file.endswith(".txt"):
-                data_pca_input = self.data_path + file   
-                pca_input_points = np.asarray(np.loadtxt(data_pca_input))
-            else:
-                continue
+
+            data_pca_input = self.data_path + file   
+            pca_input_points = np.asarray(np.loadtxt(data_pca_input))
+
+            data_gt_points_path= self.gt_points_path+file
+            data_gt_points= np.asarray(np.loadtxt(data_gt_points_path))
+
             # normalization here # TODO: change this
             pca_input_points_pcd = o3d.geometry.PointCloud()
+            data_gt_points_pcd = o3d.geometry.PointCloud()
             pca_input_points_pcd.points = o3d.utility.Vector3dVector(pca_input_points)
-            pca_input_points_pcd = normalize_bounding_box(self.global_normalization ,pca_input_points_pcd)
+            data_gt_points_pcd.points= o3d.utility.Vector3dVector(data_gt_points)
+            pca_input_points_pcd = normalize_bounding_box(self.global_normalization , pca_input_points_pcd)
+            data_gt_points_pcd = normalize_bounding_box(self.global_normalization , data_gt_points_pcd)
+
+
             self.pca_input_points_sets.append(np.asarray(pca_input_points_pcd.points))
+            self.gt_5k_points_sets.append(np.asarray(data_gt_points_pcd.points))
             self.names.append(file.replace(".txt", ""))
 
         self.pca_input_points_sets_pca= np.array(self.pca_input_points_sets)
@@ -225,11 +235,6 @@ class PCDataset(data.Dataset):
 
 
 
-
-
-
-
-
         self.basis_evecs = self.precomputed_ssm.modes_norm[:, :self.num_nodes] if self.num_nodes else self.precomputed_ssm.modes_norm
         
         precomputed_pca = {
@@ -242,10 +247,6 @@ class PCDataset(data.Dataset):
         print("show shape of self.theta_std_dev: ",self.theta_std_dev.shape)#  (64, 1)
         print("show shape of self.basis_evecs:", self.basis_evecs.shape)# (3072, 64)
 
-
-        # data_proj = self.mean + np.matmul(theta.transpose(1, 0), evecs.transpose(1, 0))
-        # data_proj = data_proj.reshape(-1, 3)
-        # exit()
         num_interpolations = 5
 
         PCAReconsPoints=[]
@@ -295,8 +296,6 @@ class PCDataset(data.Dataset):
 
             residual_data_matrix.append(res)
 
-            # exit()
-
             noise = np.random.normal(loc=mu, scale=sigma, size=(self.added_noise_dim,1))
             # print("show shape of theta_normalized:",theta_normalized.shape)
             # print("show shape of theta_normalized:",noise.shape)
@@ -305,13 +304,7 @@ class PCDataset(data.Dataset):
             # print("show shape of theta_normalized_noised:",theta_normalized_noised.shape)
             # print("show shape of self.theta_std_variance_more:",self.theta_std_variance_more.shape)
             checkReconsPC_noised = self.precomputed_ssm.theta_to_shape_norm(theta_normalized_noised*self.theta_std_variance_more, self.num_nodes+self.added_noise_dim)
-            # save_pca_recons_noised_path
-
-            
-            
-            
-
-
+ 
             checkReconsPC_pcd = o3d.geometry.PointCloud()
             checkReconsPC_pcd.points = o3d.utility.Vector3dVector(checkReconsPC)
 
@@ -333,116 +326,9 @@ class PCDataset(data.Dataset):
             PCAReconsPoints.append(checkReconsPC)
             PCAReconsPoints_noised.append(checkReconsPC_noised)
 
-            # exit()
-
-
-
-            # add noise to the PCA reconstruction(theta+points) so that the noisy points cover  
-            # lost high frenqucy information noise
-            # how to do it?
-            # save the point cloud 
-            # checkReconsPC_interpolated
-            # interpolated_vectors = []
-            # zero_vector= np.zeros_like(theta_normalized)
-            # for i in range(1, num_interpolations + 1):
-            #     alpha = i / (num_interpolations + 1)  # Interpolation factor
-            #     interpolated_vector = zero_vector + alpha * (theta_normalized - zero_vector)
-            #     interpolated_vectors.append(interpolated_vector)
-            # # Convert list to numpy array for better readability
-            # interpolated_vectors = np.array(interpolated_vectors)
-            # for idx, vec in enumerate(interpolated_vectors, 1):
-            #     print(f"Interpolated Vector {idx}: {vec}")
-            #     checkReconsPC = self.precomputed_ssm.theta_to_shape_norm(vec*self.theta_std_dev, self.num_nodes)
-            #     save_name= self.names[index]+"_interpolated_"+str(idx)
-            #     checkReconsPC_pcd = o3d.geometry.PointCloud()
-            #     checkReconsPC_pcd.points = o3d.utility.Vector3dVector(checkReconsPC)
-            #     checkReconsPC_pcd = self.denormalize_for_inference(checkReconsPC_pcd, self.global_normalization)
-            #     o3d.io.write_point_cloud(f"{save_name}.ply", checkReconsPC_pcd)
-            # exit()
-            # pcd_view2 = o3d.geometry.PointCloud()
-            # pcd_view2.points = o3d.utility.Vector3dVector(checkReconsPC)
-            # o3d.visualization.draw_geometries([pcd_view,pcd_view2])
-            # exit()
-
 
         self.pca_recons_points= np.array(PCAReconsPoints)
         self.PCAReconsPoints_noised=np.array(PCAReconsPoints_noised)
-
-
-        # complexsity= self.pca_recons_points-self.mean_shape
-        # print("show shape of complexsity:", complexsity.shape)
-        # complexsity_norm= np.linalg.norm(complexsity, axis=2)  
-        # complexsity_norm_mean= np.mean(complexsity_norm,axis=1)
-        # print("show shape of complexsity_norm_mean",complexsity_norm_mean.shape)   
-        # # how shape of complexsity: (64, 1024)
-
-        
-
-        # residual_data_matrix= np.array(residual_data_matrix)
-        # # show shape of  (64, 1024, 3)
-        # error_norms = np.linalg.norm(residual_data_matrix, axis=2)  
-        # print("show shape of error_norms", error_norms.shape)  
-        # # show shape of error_norms (64, 1024)
-        # res_norms_mean= np.mean(error_norms, axis=1)
-
-        # print("show shape of res_norms_mean", res_norms_mean.shape)  
-
-        # import matplotlib.pyplot as plt
-
-        # plt.scatter(complexsity_norm_mean, res_norms_mean, alpha=0.7)
-        # plt.xlabel('Complexity Norm Mean')
-        # plt.ylabel('Residual Norm Mean')
-        # plt.title('Correlation between Shape Complexity and Residual Magnitude')
-        # plt.grid(True)
-        # plt.show()
-
-       
-
-        # corr_pearson, p_value_pearson = pearsonr(res_norms_mean, complexsity_norm_mean)
-        # corr_spearman, p_value_spearman = spearmanr(res_norms_mean, complexsity_norm_mean)
-
-        # print(f"Pearson correlation: {corr_pearson:.3f}, p-value: {p_value_pearson:.3e}")
-        # print(f"Spearman correlation: {corr_spearman:.3f}, p-value: {p_value_spearman:.3e}")
-
-
-        # exit()
-
-        # pointwise_mean = np.mean(error_norms, axis=0)  
-
-        # pointwise_median = np.median(error_norms, axis=0)
-
-
-        # import matplotlib.pyplot as plt
-        # plt.figure(figsize=(12, 4))
-        # plt.plot(pointwise_mean, label='Mean error per point')
-        # plt.xlabel('Point index')
-        # plt.ylabel('Mean residual magnitude')
-        # plt.title('Pointwise Mean Residual Norm')
-        # plt.legend()
-        # plt.show()
-        # plt.boxplot(error_norms.T, showfliers=False)
-        # plt.xlabel('Point index')
-        # plt.ylabel('Error Norm')
-        # plt.title('Boxplot of residual norms (per point)')
-        # plt.show()
-        # exit()
-
-
-
-        # residual_data_matrix= residual_data_matrix.reshape(residual_data_matrix.shape[0], -1)
-        # print("show shape of ",residual_data_matrix.shape)   
-        # # show shape of  (32, 3072)
-        # residual_data_matrix_mean= np.mean(residual_data_matrix,axis=0)
-        # print("show shape of residual_data_matrix_mean ",residual_data_matrix_mean.shape)   
-        # # show shape of residual_data_matrix_mean  (3072,)
-       
-
-        
-        # exit()
-
-
-
-
         losses = np.array(list(self.names_loss.values())).reshape(-1, 1)
         # Define percentile thresholds for 40/40/20 split
         p40 = np.percentile(losses, 40)  # Easy threshold
@@ -459,42 +345,7 @@ class PCDataset(data.Dataset):
             else:
                 hard_samples[name] = loss
 
-        # Print statistics
-        # print(f"Total samples: {len(self.names_loss)}")
-        # print(f"Easy samples: {len(easy_samples)} ({len(easy_samples)/len(self.names_loss)*100:.1f}%)")
-        # print(f"Medium samples: {len(medium_samples)} ({len(medium_samples)/len(self.names_loss)*100:.1f}%)")
-        # print(f"Hard samples: {len(hard_samples)} ({len(hard_samples)/len(self.names_loss)*100:.1f}%)")
-        # # Print threshold values
-        # print(f"\nThresholds:")
-        # print(f"Easy-Medium threshold (40th percentile): {p40:.6f}")
-        # print(f"Medium-Hard threshold (80th percentile): {p80:.6f}")
-        # print(f"Max loss: {max_loss:.6f}")
-
-
-        # import matplotlib.pyplot as plt
-        # plt.figure(figsize=(10, 6))
-        # plt.hist(losses, bins=50, alpha=0.7)
-        # plt.axvline(p40, color='g', linestyle='--', label='40th percentile (Easy-Medium)')
-        # plt.axvline(p80, color='r', linestyle='--', label='80th percentile (Medium-Hard)')
-        # plt.xlabel('Loss Values')
-        # plt.ylabel('Frequency')
-        # plt.title('Distribution of Deformation Losses (40/40/20 split)')
-        # plt.legend()
-        # plt.show()
-        # exit()
-
-        # print("see shape of pca_input_points_sets:",self.pca_input_points_sets_pca.shape)        
-        # print("see shape of pca_input_points_sets_array_flat:",self.pca_input_points_sets_pca_flat.shape)       
-        # reduant_mean= np.mean(self.pca_input_points_sets_array_flat, 0)
-        # reduant_mean_mean_shape = reduant_mean.reshape(self.num_points, 3)
-        # self.reduant_mean_mean_shape_shape_pcd = o3d.geometry.PointCloud()
-        # self.reduant_mean_mean_shape_shape_pcd.points = o3d.utility.Vector3dVector(reduant_mean_mean_shape)
-        # o3d.visualization.draw_geometries([self.reduant_mean_mean_shape_shape_pcd, self.normalized_mean_shape_pcd])
-        # o3d.io.write_point_cloud("1filename.ply", self.reduant_mean_mean_shape_shape_pcd)
-        # o3d.io.write_point_cloud("2filename.ply", self.normalized_mean_shape_pcd)
-        # exit()
-
-
+        
 
 
     def get_scale_factor(self, mean_shape_pcd):
@@ -564,7 +415,7 @@ class PCDataset(data.Dataset):
         name = self.names[index]
         pca_recon = self.pca_recons_points[index]
         pca_theta = self.pca_theta_sets[index]
-
+        gt_5k_points= self.gt_5k_points_sets[index]
         pca_noised_recon= self.PCAReconsPoints_noised[index]
 
         # pca_input_j = self.pca_input_points_sets[j]
@@ -575,6 +426,7 @@ class PCDataset(data.Dataset):
         pca_input = torch.from_numpy(pca_input).float()
         pca_recon = torch.from_numpy(pca_recon).float()
         pca_theta = torch.from_numpy(pca_theta).float()
+        gt_5k_points= torch.from_numpy(gt_5k_points).float()
         pca_noised_recon=torch.from_numpy(pca_noised_recon).float()
         pca_theta = pca_theta.T
         shape_idx= torch.tensor(index, dtype=torch.long)
@@ -591,7 +443,7 @@ class PCDataset(data.Dataset):
         # exit()
 
         # return shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j
-        return shape_idx, name, pca_theta, pca_recon, pca_input, pca_noised_recon
+        return shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon
 
     def __len__(self):
         return len(self.pca_input_points_sets)
@@ -603,6 +455,7 @@ class PCDValataset(data.Dataset):
         # run dataloader for train, then val set
 
         self.data_path = os.path.join(args.dataset, set_type+'_set/', "pca_input/") 
+        self.gt_points_path= os.path.join(args.dataset, set_type+'_set/', "gt_points/") 
         self.num_points= args.num_input_points # 1024 
         self.num_nodes = args.lat_dims # 64
 
@@ -615,6 +468,7 @@ class PCDValataset(data.Dataset):
         print(self.data_path)# dataset/part_chair_leg_pca64
         self.pca_input_points_sets = []
         self.pca_recon_points_sets = []
+        self.gt_5k_points_sets = []
         self.pca_scales_sets = []
         self.pca_theta_sets= []
         self.names = []
@@ -624,6 +478,10 @@ class PCDValataset(data.Dataset):
             if file.endswith(".txt"):
                 data_pca_input = self.data_path + file   
                 pca_input_points = np.asarray(np.loadtxt(data_pca_input))
+
+                data_gt_points_path= self.gt_points_path+file
+                data_gt_points= np.asarray(np.loadtxt(data_gt_points_path))
+
             else:
                 continue
             # normalization here # TODO: change this
@@ -633,6 +491,10 @@ class PCDValataset(data.Dataset):
             self.pca_input_points_sets.append(np.asarray(pca_input_points_pcd.points))
             self.names.append(file.replace(".txt", ""))
 
+            data_gt_points_pcd = o3d.geometry.PointCloud()
+            data_gt_points_pcd.points= o3d.utility.Vector3dVector(data_gt_points)
+            data_gt_points_pcd = normalize_bounding_box(self.global_normalization , data_gt_points_pcd)
+            self.gt_5k_points_sets.append(np.asarray(data_gt_points_pcd.points))
     
         self.precomputed_ssm = precomputed_ssm
 
@@ -755,6 +617,7 @@ class PCDValataset(data.Dataset):
         pca_recon = self.pca_recons_points[index]
         pca_theta = self.pca_theta_sets[index]
         pca_noised_recon= self.PCAReconsPoints_noised[index]
+        gt_5k_points= self.gt_5k_points_sets[index]
         
         pca_recon = torch.from_numpy(pca_recon).float()
         pca_input = torch.from_numpy(pca_input).float()
@@ -762,6 +625,7 @@ class PCDValataset(data.Dataset):
         pca_theta = torch.from_numpy(pca_theta).float()
         pca_theta = pca_theta.T
         pca_noised_recon=torch.from_numpy(pca_noised_recon).float()
+        gt_5k_points= torch.from_numpy(gt_5k_points).float()
 
         shape_idx= torch.tensor(index, dtype=torch.long)
         
@@ -783,7 +647,7 @@ class PCDValataset(data.Dataset):
 
 
         # return name, pca_theta, pca_input
-        return shape_idx, name, pca_theta, pca_recon, pca_input, pca_noised_recon
+        return shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon
 
     def __len__(self):
         return len(self.pca_input_points_sets)
