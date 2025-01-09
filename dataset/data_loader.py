@@ -4,6 +4,7 @@ import sys
 sys.path.append('..')
 import torch
 import torch.utils.data as data
+from torch.utils.data import  Sampler
 import numpy as np
 import os
 import open3d as o3d
@@ -18,6 +19,10 @@ from utils_ssm.evaluation_utils import (
     save_point_cloud
 )
 from sklearn.cluster import KMeans
+
+
+SPLITS = ["train", "test", "val", "*"]
+
 
 
 def load_points(file_path):
@@ -128,6 +133,10 @@ class PCDataset(data.Dataset):
 
         self.data_length = len(self.data_files)
 
+        save_pca_recons_path= os.path.join(args.dataset, "pca_recons_"+str(self.num_nodes))
+        if not os.path.exists(save_pca_recons_path):
+            os.makedirs(save_pca_recons_path)
+
 
 
         # print("show (np.load(self.corrVertsPath)).shape[1]:",(np.load(self.corrVertsPath)).shape[1])
@@ -145,7 +154,9 @@ class PCDataset(data.Dataset):
 
         # perform clustering over the mean shape
         # clustering the mean shape:
-        labels = cluster_points(self.mean_shape, method='kmeans', n_clusters=self.n_clusters)    
+        labels = cluster_points(self.mean_shape, method='kmeans', n_clusters=self.n_clusters)  
+
+        self.mean_shape_point_labels= labels  
         unique_labels, label_counts = np.unique(labels, return_counts=True)
         print("unique_labels:",unique_labels)# [0 1 2 3]
         print("label_counts:", label_counts) # 282, 227，287，228
@@ -212,8 +223,7 @@ class PCDataset(data.Dataset):
         self.theta_std_dev = np.sqrt(self.theta_variance)
 
         
-        
-
+    
 
         self.basis_evecs = self.precomputed_ssm.modes_norm[:, :self.num_nodes] if self.num_nodes else self.precomputed_ssm.modes_norm
         
@@ -233,14 +243,14 @@ class PCDataset(data.Dataset):
         # exit()
         num_interpolations = 5
 
+        PCAReconsPoints=[]
         max_loss= 0
         self.names_loss ={}
 
         for index, normalzied_input in enumerate(self.pca_input_points_sets):
             # print("see shape of normalzied_input:",normalzied_input.shape)# (1024, 3)
-
-            # pcd_view = o3d.geometry.PointCloud()
-            # pcd_view.points = o3d.utility.Vector3dVector(normalzied_input)
+            pcd_view = o3d.geometry.PointCloud()
+            pcd_view.points = o3d.utility.Vector3dVector(normalzied_input)
 
             loss= F.mse_loss(torch.tensor(normalzied_input), torch.tensor(self.mean_shape), reduction='mean')
        
@@ -248,15 +258,22 @@ class PCDataset(data.Dataset):
                 max_loss= loss.item()
             self.names_loss[self.names[index]]= loss.item()
 
-
-
-
             theta_vector = self.precomputed_ssm.get_theta(normalzied_input, self.num_nodes)            
             # whiting/sphere
             theta_normalized = theta_vector / self.theta_std_dev
             self.pca_theta_sets.append(theta_normalized)
-            # checkReconsPC = self.precomputed_ssm.theta_to_shape_norm(theta_vector, self.num_nodes)
+            checkReconsPC = self.precomputed_ssm.theta_to_shape_norm(theta_vector, self.num_nodes)
 
+            save_name= self.names[index]+"_"+str(self.num_nodes)+"_"+".ply"
+            save_name_path= os.path.join(save_pca_recons_path, save_name)
+            o3d.io.write_point_cloud(save_name_path, checkReconsPC)
+            PCAReconsPoints.append(checkReconsPC)
+            
+
+
+
+
+            # save the point cloud 
             # checkReconsPC_interpolated
             # interpolated_vectors = []
             # zero_vector= np.zeros_like(theta_normalized)
@@ -264,7 +281,6 @@ class PCDataset(data.Dataset):
             #     alpha = i / (num_interpolations + 1)  # Interpolation factor
             #     interpolated_vector = zero_vector + alpha * (theta_normalized - zero_vector)
             #     interpolated_vectors.append(interpolated_vector)
-
             # # Convert list to numpy array for better readability
             # interpolated_vectors = np.array(interpolated_vectors)
             # for idx, vec in enumerate(interpolated_vectors, 1):
@@ -276,14 +292,16 @@ class PCDataset(data.Dataset):
             #     checkReconsPC_pcd = self.denormalize_for_inference(checkReconsPC_pcd, self.global_normalization)
             #     o3d.io.write_point_cloud(f"{save_name}.ply", checkReconsPC_pcd)
             # exit()
+            pcd_view2 = o3d.geometry.PointCloud()
+            pcd_view2.points = o3d.utility.Vector3dVector(checkReconsPC)
+            o3d.visualization.draw_geometries([pcd_view,pcd_view2])
+            exit()
+
+
+        self.pca_recons_points= np.array(PCAReconsPoints)
 
 
 
-
-            # pcd_view2 = o3d.geometry.PointCloud()
-            # pcd_view2.points = o3d.utility.Vector3dVector(checkReconsPC)
-            # o3d.visualization.draw_geometries([pcd_view,pcd_view2])
-            # exit()
 
         losses = np.array(list(self.names_loss.values())).reshape(-1, 1)
         # Define percentile thresholds for 40/40/20 split
@@ -302,15 +320,15 @@ class PCDataset(data.Dataset):
                 hard_samples[name] = loss
 
         # Print statistics
-        print(f"Total samples: {len(self.names_loss)}")
-        print(f"Easy samples: {len(easy_samples)} ({len(easy_samples)/len(self.names_loss)*100:.1f}%)")
-        print(f"Medium samples: {len(medium_samples)} ({len(medium_samples)/len(self.names_loss)*100:.1f}%)")
-        print(f"Hard samples: {len(hard_samples)} ({len(hard_samples)/len(self.names_loss)*100:.1f}%)")
-        # Print threshold values
-        print(f"\nThresholds:")
-        print(f"Easy-Medium threshold (40th percentile): {p40:.6f}")
-        print(f"Medium-Hard threshold (80th percentile): {p80:.6f}")
-        print(f"Max loss: {max_loss:.6f}")
+        # print(f"Total samples: {len(self.names_loss)}")
+        # print(f"Easy samples: {len(easy_samples)} ({len(easy_samples)/len(self.names_loss)*100:.1f}%)")
+        # print(f"Medium samples: {len(medium_samples)} ({len(medium_samples)/len(self.names_loss)*100:.1f}%)")
+        # print(f"Hard samples: {len(hard_samples)} ({len(hard_samples)/len(self.names_loss)*100:.1f}%)")
+        # # Print threshold values
+        # print(f"\nThresholds:")
+        # print(f"Easy-Medium threshold (40th percentile): {p40:.6f}")
+        # print(f"Medium-Hard threshold (80th percentile): {p80:.6f}")
+        # print(f"Max loss: {max_loss:.6f}")
 
 
         # import matplotlib.pyplot as plt
@@ -372,31 +390,63 @@ class PCDataset(data.Dataset):
         return self.global_normalization
 
 
+    def combinations_to_idx(self, i, j):
+        """Convert a pair of indices to a linear index."""
+        idx = i * self.data_length + j
+        if hasattr(idx, "__len__"):
+            idx = np.array(idx, dtype=int)
+        else:
+            idx = int(idx)
+        return idx
+    
+    def idx_to_combinations(self, idx):
+        """Convert s linear index to a pair of indices."""
+        i = np.floor(idx / self.data_length)
+        j = idx - i * self.data_length
+        if hasattr(idx, "__len__"):
+            i = np.array(i, dtype=int)
+            j = np.array(j, dtype=int)
+        else:
+            i = int(i)
+            j = int(j)
+        return i, j
+
+
+
     def __getitem__(self, index):
-        pca_input = self.pca_input_points_sets[index]
-        name = self.names[index]
-        # pca_recon = self.pca_recon_points_sets[index]
-        pca_theta = self.pca_theta_sets[index]
+
+        i, j = self.idx_to_combinations(index)
+
+
+        pca_input = self.pca_input_points_sets[i]
+        name = self.names[i]
+        pca_recon = self.pca_recons_points[index]
+        pca_theta = self.pca_theta_sets[i]
+
+        pca_input_j = self.pca_input_points_sets[j]
+        name_j = self.names[j]
+        pca_recon_j = self.pca_recons_points[index]
+        pca_theta_j = self.pca_theta_sets[j]
         
 
         pca_input = torch.from_numpy(pca_input).float()
         # pca_recon = torch.from_numpy(pca_recon).float()
         pca_theta = torch.from_numpy(pca_theta).float()
         pca_theta = pca_theta.T
+        shape_idx= torch.tensor(i, dtype=torch.long)
 
-        shape_idx= torch.tensor(index, dtype=torch.long)
 
-        # print(pca_input.shape)
-        # print(pca_recon.shape)
-        # print(pca_theta.shape)
-        # torch.Size([1024, 3])
-        # torch.Size([1024, 3])
-        # torch.Size([1,64])
+        pca_input_j = torch.from_numpy(pca_input_j).float()
+        # pca_recon = torch.from_numpy(pca_recon).float()
+        pca_theta_j = torch.from_numpy(pca_theta_j).float()
+        pca_theta_j = pca_theta_j.T
+        shape_idx_j= torch.tensor(j, dtype=torch.long)
+
+        # print("shape_idx",shape_idx)
+        # print("shape_idx_j",shape_idx_j)
         # exit()
 
-
-
-        return shape_idx, name, pca_theta, pca_input
+        return shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j
 
     def __len__(self):
         return len(self.pca_input_points_sets)
@@ -601,8 +651,129 @@ class CurriculumPCDataset(PCDataset):
         return len(self.active_indices)
 
 
+   
+class RandomPairSampler(Sampler):
+    """Data sampler for sampling random pairs from PCDataset."""
+    
+    def __init__(self, dataset, n_samples, replace=False):
+        """
+        Initialize the sampler.
+        
+        Args:
+            dataset: PCDataset instance
+            n_samples: Number of pairs to sample
+            replace: Whether to sample with replacement
+        """
+        self.dataset = dataset
+        print("show see .n_samples:",n_samples)
+        self.n_samples = min(n_samples, len(dataset))
+
+    
+        self.replace = replace
+        self.n_total = len(dataset)
+        
+        if not replace and n_samples > self.n_total:
+            raise RuntimeError(
+                f"Number of samples ({n_samples}) must be "
+                f"less than number of shapes ({self.n_total})"
+            )
+
+    def __iter__(self):
+        """Generate random pairs of indices."""
+        if self.replace:
+            # Sample with replacement
+            src_idxs = np.random.choice(np.arange(self.n_total), self.n_samples, replace=True)
+            tar_idxs = np.random.choice( np.arange(self.n_total), self.n_samples, replace=True)
+        else:
+            src_idxs = np.random.permutation(np.arange(self.n_total))[: int(self.n_samples)]
+            tar_idxs = np.random.permutation( np.arange(self.n_total))[: int(self.n_samples)]
+
+        combo_ids = self.dataset.combinations_to_idx(src_idxs, tar_idxs)
+        return iter(combo_ids)
+
+    def __len__(self):
+        """Return the number of pairs to be sampled."""
+        return self.n_samples
+    
 
 
+# # Custom collate function to handle paired data
+# def paired_collate_fn(batch):
+#     """
+#     Custom collate function for paired data.
+#     Returns (ii, jj, source_pts, target_pts)
+    
+#     Args:
+#         batch: List of pairs [(src_data, tar_data), ...]
+    
+#     Returns:
+#         Tuple containing:
+#             ii (torch.LongTensor): Source indices
+#             jj (torch.LongTensor): Target indices
+#             source_pts (torch.FloatTensor): Source point clouds
+#             target_pts (torch.FloatTensor): Target point clouds
+#     """
+#     src_indices = []
+#     tar_indices = []
+#     source_pts = []
+#     target_pts = []
+    
+#     for pair in batch:
+#         # Each pair contains (src_data, tar_data)
+#         # And each *_data is (shape_idx, name, theta, points)
+#         src_data = pair[0]
+#         tar_data = pair[1]
+        
+#         src_indices.append(src_data[0])  # shape_idx
+#         tar_indices.append(tar_data[0])  # shape_idx
+#         source_pts.append(src_data[3])   # points
+#         target_pts.append(tar_data[3])   # points
+    
+#     # Convert to tensors
+#     ii = torch.stack([torch.tensor(idx) for idx in src_indices])
+#     jj = torch.stack([torch.tensor(idx) for idx in tar_indices])
+#     source_pts = torch.stack(source_pts)
+#     target_pts = torch.stack(target_pts)
+    
+#     return ii, jj, source_pts, target_pts
+
+def paired_collate_fn(batch):
+    """
+    Custom collate function for paired data.
+    Returns (ii, jj, source_pts, target_pts)
+    
+    Input batch contains tuples of:
+    (shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j)
+    """
+    # Initialize lists for each component
+    ii, jj = [], []
+    source_pts, target_pts = [], []
+    source_thetas, target_thetas = [], []
+    source_names, target_names = [], []
+    
+    for item in batch:
+        # Unpack each item
+        shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j = item
+        
+        # Append to respective lists
+        ii.append(shape_idx)
+        jj.append(shape_idx_j)
+        source_pts.append(pca_input)
+        target_pts.append(pca_input_j)
+        source_thetas.append(pca_theta)
+        target_thetas.append(pca_theta_j)
+        source_names.append(name)
+        target_names.append(name_j)
+    
+    # Stack tensors
+    ii = torch.stack(ii)
+    jj = torch.stack(jj)
+    source_pts = torch.stack(source_pts)
+    target_pts = torch.stack(target_pts)
+    source_thetas = torch.stack(source_thetas)
+    target_thetas = torch.stack(target_thetas)
+    
+    return ii, jj, source_pts, target_pts, source_thetas, target_thetas, source_names, target_names
 
 class InferenceDataset(data.Dataset):
     def __init__(self, recon_folder_path):

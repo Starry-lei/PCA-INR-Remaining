@@ -2,13 +2,19 @@
 dataset: dataset/part_chair_leg_pca64
 work_dir: exp_shapeNet_chair_leg/
 batch_size: 4
-model_name: displacement_flow # displacement_flow # dgcnn_transfomer
+model_name: point2ssm # displacement_low_dim_denoiser # displacement_MHA_flow  # displacement_flow # displacement_flow_High_low_latent # displacement_res_deform
 device: cuda:0
 epochs: 2000
-
-lat_dims: 16 # 64
+coarse_to_fine: False
+encoder: dgcnn
+alpha: 0.1
+lat_dims: 20 # 64
+lat_high_freq_dims: 8 # 64
+local_dim: 64
+latent_dim: 128
 num_input_points: 1024
-deformer_nf: 96 # 80? 96? 128?
+num_output_points: 1024
+deformer_nf: 64 # 80? 96? 128?
 guidance_interpolation: 2
 n_clusters: 4
 solver: 'dopri5'
@@ -22,17 +28,6 @@ symm: False
 return_waypoints: False
 use_latent_waypoints: False
 
-# input_size: 3
-# hidden_size: 512
-# num_layers: 3
-# output_size: 3
-# pca_dim: 64
-# num_mapping_layers: 2
-
-
-# latent_dim: 128
-# num_output_points: 1024
-
 
 loss: cd_t
 nepoch: 3000
@@ -42,7 +37,7 @@ early_stop_start: 0
 
 optimizer: AdamW
 betas: 0.9, 0.999
-lr: 0.001
+lr: 0.0001
 lr_decay: False
 
 manual_seed: 42

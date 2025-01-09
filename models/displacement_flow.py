@@ -143,9 +143,6 @@ class ImNet(nn.Module): # develop a transformation based IMNet?
         Returns:
           output through this layer of shape [batch_size, out_features].
         """
-
-
-
         x_tmp = x
         for dense in self.fc[:4]:
             x_tmp = self.activ(dense(x_tmp))
@@ -402,6 +399,7 @@ class DeformationFlowNetwork(nn.Module):
         nonlinearity="leakyrelu",
         arch="imnet",
         divfree=False,
+        mean_shape_point_labels=None
     ):
         """Intialize deformation flow network.
 
@@ -421,6 +419,7 @@ class DeformationFlowNetwork(nn.Module):
 
         self.arch = arch
         self.divfree = divfree
+        self.mean_shape_point_labels= mean_shape_point_labels
 
         assert arch in ["imnet", "vanilla","TransFlowNet"]
         if arch == "imnet":
@@ -667,6 +666,7 @@ class NeuralFlowModel(nn.Module):
         no_sign_net=False,
         divfree=False,
         symm_dim=None,
+        mean_shape_point_labels=None
     ):
         super(NeuralFlowModel, self).__init__()
         if conformal:
@@ -685,6 +685,7 @@ class NeuralFlowModel(nn.Module):
             nonlinearity=nonlinearity,
             arch=arch,
             divfree=divfree,
+            mean_shape_point_labels=None
         )
         if not no_sign_net:
             self.sign_net = DeformationSignNetwork(
@@ -705,6 +706,8 @@ class NeuralFlowModel(nn.Module):
         self.basis_params=None
         self.std_dev_params=None
         self.flow_lat_params=None
+
+        self.mean_shape_point_labels= mean_shape_point_labels
         
 
         # self.scale = nn.Parameter(torch.ones(1))
@@ -850,7 +853,6 @@ class NeuralFlowModel(nn.Module):
         outward = torch.norm(latent_t0 - zeros, dim=1) < 1e-6  # [batch]
         # So -1 indicates the latent point is not near the origin (norm > 1e-6), which affects the direction of transformation.
         sign = (outward.float() - 0.5) * 2
-
         return latent_val, latent_dir, sign
 
     def forward(self, t, points):
@@ -881,6 +883,7 @@ class NeuralFlowModel(nn.Module):
                 # print(" latent_val grad:",latent_val.requires_grad) # True
                 # exit()
                 sign = sign[:, None, None] * self.scale
+
                 if self.symm_dim is None:
                     # print("symm_dim show points grad:",points.requires_grad)
                     flow = self.flow_net(latent_val, points)  # [batch, num_pints, dim]
@@ -897,6 +900,7 @@ class NeuralFlowModel(nn.Module):
 
                 if not self.no_sign_net:
                     sign = self.sign_net(latent_dir)
+
                 flow_signed=flow * sign
 
                 # print("show flow_signed shape:",flow_signed.shape)# torch.Size([8, 1024, 3])
@@ -923,7 +927,7 @@ class NeuralFlowModel(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, args, shape_mask_clusters=None):
+    def __init__(self, args, shape_mask_clusters=None, mean_shape_point_labels= None):
         super(Model,self).__init__()
 
         self.method = args.solver
@@ -936,12 +940,12 @@ class Model(nn.Module):
         self.deformer_nf= args.deformer_nf
 
         self.guidance_interpolation= args.guidance_interpolation
-        self.coarse_to_fine = True # True # False
+        self.coarse_to_fine = args.coarse_to_fine # True # False
+        self.mean_shape_point_labels= mean_shape_point_labels
 
         # self.shape_mask_clusters= shape_mask_clusters
         # TODO: try vector field from flowSSM ?
 
-        
 
 
         self.odeint = odeint_adjoint if args.adjoint else odeint_regular
@@ -986,6 +990,7 @@ class Model(nn.Module):
                 no_sign_net=self.no_sign_net,
                 divfree=False,
                 symm_dim=(2 if args.symm else None),
+                mean_shape_point_labels=self.mean_shape_point_labels
                     )                    
                 )
         

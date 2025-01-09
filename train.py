@@ -1,6 +1,6 @@
 
 
-from dataset.data_loader import PCDataset
+from dataset.data_loader import PCDataset,RandomPairSampler,paired_collate_fn
 from dataset.data_loader import PCDValataset
 from dataset.data_loader import CurriculumPCDataset
 import argparse
@@ -88,15 +88,30 @@ def train(args):
 
     dataset_train = PCDataset(args, 'train')
 
+    # Create sampler
+    train_sampler = RandomPairSampler(
+        dataset=dataset_train,
+        n_samples=len(dataset_train), # or any other number you want
+        replace=False
+    )
+
+    # Create data loader
+    dataloader_train = torch.utils.data.DataLoader(
+        dataset_train,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=True,
+        sampler=train_sampler,
+        collate_fn=paired_collate_fn,
+        num_workers=int(args.workers)
+    )
+
     # dataset_train = CurriculumPCDataset(args, set_type='train', phase='easy')
-
-
-
     # dataset_val = PCDataset(args, 'val')
     dataset_val= PCDValataset(args, 'val', global_normalization=dataset_train.global_normalization, mean_shape=dataset_train.normalized_mean_shape_pcd, precomputed_ssm=dataset_train.precomputed_ssm)
 
 
-    dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
+    # dataloader_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.batch_size, shuffle=True, num_workers=int(args.workers))
     dataloader_val = torch.utils.data.DataLoader(dataset_val, batch_size=args.batch_size, shuffle=False, num_workers=int(args.workers))
     
     
@@ -121,7 +136,7 @@ def train(args):
 
     shape_mask_clusters = dataset_train.mask_clusters
     
-    model = model_module.Model(args, shape_mask_clusters=shape_mask_clusters)
+    model = model_module.Model(args, shape_mask_clusters=shape_mask_clusters, mean_shape_point_labels= dataset_train.mean_shape_point_labels)
     # try transformer model used in partSSM
     model = model.to(device) 
 
@@ -199,11 +214,11 @@ def train(args):
         model.load_state_dict(torch.load(path))
 
     criterion_mse = torch.nn.MSELoss(reduction='none') # hybrid_loss with chamfer_loss # reduction='none': reduction='sum'
-    criterion_chamfer= calc_cd2
+    criterion_chamfer = calc_cd2
 
 
-    bug_handling= "./bug_handling"
-    # bug_handling= "./bug_handling_no_c2f"
+    # bug_handling= "./bug_handling"
+    bug_handling= "./bug_handling_no_c2f"
     loss_scaler= 1 # 1024.0
     global_step = 0
 
@@ -220,29 +235,40 @@ def train(args):
 
         # print(f"Epoch {epoch}, Phase: {dataset_train.phase}, Active samples: {len(dataset_train)}")
         
-        for shape_idx, name, pca_theta, pca_input in tqdm_train_loader:
-            pca_mean_shape = the_pca_mean_shape.repeat(pca_input.shape[0], 1, 1)# # torch.Size([4, 1024, 3])
-            pca_theta= pca_theta.squeeze(1)
+        for data_tensors  in tqdm_train_loader:
 
-            
+            ii, jj, source_pts, target_pts, source_thetas, target_thetas, source_names, target_names = data_tensors
 
-
-            flow_lat= flow_lat_params[shape_idx]
-
-            # print("shape of flow_lat:", flow_lat.shape) # torch.Size([4, 10])
+            # print("show shape of ii", ii.shape)
+            # print("show val of ii", ii) # [ 8, 28]
+            # print("show shape of jj", jj.shape)
+            # print("show val of jj", jj) # ([ 4, 25]
+            # exit()
+            # shape_idx, name, pca_theta, pca_input= data_tensors
+            pca_mean_shape = the_pca_mean_shape.repeat(source_pts.shape[0], 1, 1)# # torch.Size([1, 1024, 3])
+            # pca_theta= pca_theta.squeeze(1)
+            source_thetas= source_thetas.squeeze(1)    
+            target_theta = target_thetas.squeeze(1)    
+            flow_lat_source= flow_lat_params[ii]
+            flow_lat_target= flow_lat_params[jj]
+            # print("shape of flow_lat_source:", flow_lat_source.shape) # torch.Size([4, 10])
+            # print("shape of flow_lat_target:", flow_lat_target.shape) # torch.Size([4, 10])
+            # print("show shape of source_pts:",source_pts.shape) # 1,1024, 3
+            # print("show shape of source_thetas:",source_thetas.shape) # 1,1024, 3
+            # print("show shape of target_theta:",target_theta.shape) # 1,1024, 3
             # exit()
 
 
             # print("shape of pca_input:", pca_input.shape) # torch.Size([4, 1024, 3])
-            mean_latents= torch.zeros_like(flow_lat)
+            mean_latents= torch.zeros_like(flow_lat_source)
             # batch together source and target shape for two-way loss training
-            source_target_points = torch.cat([pca_mean_shape, pca_input], dim=0)
-            target_source_points = torch.cat([pca_input, pca_mean_shape], dim=0)
+            source_target_points = torch.cat([pca_mean_shape, source_pts], dim=0)
+            target_source_points = torch.cat([target_pts, pca_mean_shape], dim=0)
             # print("see source_target_points shape :", source_target_points.shape)#  torch.Size([8, 1024, 3])
-            source_target_latents = torch.cat([mean_latents, flow_lat], dim=0)
-            target_source_latents = torch.cat([flow_lat, mean_latents], dim=0)
-            g_source_target_latents = torch.cat([mean_latents, pca_theta], dim=0)
-            g_target_source_latents = torch.cat([pca_theta, mean_latents], dim=0)
+            source_target_latents = torch.cat([mean_latents, flow_lat_source], dim=0)
+            target_source_latents = torch.cat([flow_lat_target, mean_latents], dim=0)
+            g_source_target_latents = torch.cat([mean_latents, source_thetas], dim=0)
+            g_target_source_latents = torch.cat([target_theta, mean_latents], dim=0)
 
 
 
@@ -253,12 +279,12 @@ def train(args):
             latent_seq = torch.stack([source_target_latents, target_source_latents], dim=1)
             g_latent_seq = torch.stack([g_source_target_latents, g_target_source_latents], dim=1)
             # print("show latent_seq:",latent_seq.shape)            
-            deformed_pts, interpo_points_basis_transformed = model(source_target_points[..., :3], latent_seq, pca_guidance_latents=g_latent_seq, shape_name=name)  # Not set to via_hub.
+            deformed_pts, interpo_points_basis_transformed = model(source_target_points[..., :3], latent_seq, pca_guidance_latents=g_latent_seq, shape_name=source_names)  # Not set to via_hub.
             # print("see epoch:",epoch_idx)
             # print("see epoch % 100:",epoch_idx % 100)
-            main_deformed_pts= deformed_pts[-2*pca_input.shape[0]:,:]
+            main_deformed_pts= deformed_pts[-2*source_pts.shape[0]:,:]
 
-            reg_deformed_pts= deformed_pts[:-2*pca_input.shape[0],:]
+            reg_deformed_pts= deformed_pts[:-2*source_pts.shape[0],:]
 
             # print("show shape of main_deformed_pts",main_deformed_pts.shape) # 2, 1024, 3
             # print("show shape of reg_deformed_pts",reg_deformed_pts.shape) # 6, 1024, 3
