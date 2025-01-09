@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name="INR"
+#SBATCH --job-name="part_denoiser"
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1,VRAM:30G
