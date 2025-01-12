@@ -66,7 +66,7 @@ def mean_flat(tensor):
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
-def train(args):
+def train(args, log_dir=None):
     if torch.cuda.is_available():
         print(f"Total GPUs: {torch.cuda.device_count()}")
         for i in range(torch.cuda.device_count()):
@@ -92,6 +92,12 @@ def train(args):
     num_epochs = args.epochs
 
     dataset_train = PCDataset(args, 'train')
+
+    best_model_weights_path= os.path.join(log_dir, 'best_model_weights.pth')
+    latest_model_weights_path=os.path.join(log_dir, 'latest_model_weights.pth')
+
+
+    
 
     
     dataset_val= PCDValataset(args, 'val', global_normalization=dataset_train.global_normalization, mean_shape=dataset_train.normalized_mean_shape_pcd, precomputed_ssm=dataset_train.precomputed_ssm)
@@ -189,7 +195,7 @@ def train(args):
             # # torch.Size([4, 5000, 3])
 
             # exit()
-            pred, loss_mse = model(pca_noised_recon, gt_5k_points)
+            pred, loss_mse = model(pca_noised_recon, gt=gt_5k_points)
             loss= loss_mse.mean()
             # print("show loss:",loss)
             # exit()
@@ -220,7 +226,7 @@ def train(args):
                 pca_noised_recon= pca_noised_recon.to(device)
                 pca_input= pca_input.to(device)
                 gt_5k_points= gt_5k_points.to(device)
-                pred, loss_mse = model(pca_noised_recon, gt_5k_points)
+                pred, loss_mse = model(pca_noised_recon, gt=gt_5k_points)
                 loss= loss_mse.mean()
                 # loss = loss_mse
                 val_loss += loss.item()
@@ -230,12 +236,12 @@ def train(args):
         wandb.log({"val_loss": val_loss,}, step=global_step)# , step=global_step
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), 'best_model_weights.pth')
+            torch.save(model.state_dict(), best_model_weights_path)
             wandb.log({"best_val_loss": best_val_loss}, step=global_step)
 
 
         global_step += 1
-        torch.save(model.state_dict(), 'latest_model_weights.pth')
+        torch.save(model.state_dict(), latest_model_weights_path)
 
 
     
@@ -271,14 +277,19 @@ def main():
         print("log_dir:",log_dir)
         logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler(os.path.join(log_dir, 'train.log')),
                                                         logging.StreamHandler(sys.stdout)])
-    train(args)
+    train(args, log_dir=log_dir)
 
 
     #test() visualize the result
 
 if __name__ == '__main__':
-    # conda activate diffTheta
+    # conda activate freereg strucNet/ freereg
     # python train_PointFilter.py -c cfgs/config.yaml
+
+    # python train_PointFilter.py -c cfgs/config_part_back.yaml
+    # python train_PointFilter.py -c cfgs/config_part_seat.yaml
+    # python train_PointFilter.py -c cfgs/config_part_armrest.yaml
+   
     main()
 
 

@@ -1,0 +1,4 @@
+armrest
+back
+seat
+leg

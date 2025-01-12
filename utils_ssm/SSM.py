@@ -4,7 +4,7 @@ from sklearn.decomposition import PCA
 from warnings import warn
 from typing import Any, Tuple
 import matplotlib.pyplot as plt
-
+import open3d as o3d
 from sklearn.manifold import TSNE
 from sklearn.cluster import DBSCAN
 def check_data_scale(dataset: np.ndarray) -> None:
@@ -56,6 +56,12 @@ class SSM:
         self.mean = np.mean(correspondences, 0)
         print("see self.mean shape:",self.mean.shape)
         self.max_mode = 128
+
+        self.mean_shape = self.mean.reshape(1024, 3)
+
+        self.mean_shape_pcd = o3d.geometry.PointCloud()
+        self.mean_shape_pcd.points = o3d.utility.Vector3dVector(self.mean_shape)
+        self.global_normalization = self.get_scale_factor( self.mean_shape_pcd)
 
 
 
@@ -181,6 +187,58 @@ class SSM:
         # # save desired_variance as global variable to help post-processing and debugging
         # self.desired_variance = desired_variance
         # print("desired_variance shape", self.desired_variance)
+
+
+    def normalize_mean_shape(self, global_normalization, mean_shape):
+        aabb_center = global_normalization[0]
+        scale_factor= global_normalization[1]
+        mean_shape.translate(-aabb_center)    
+        mean_shape.scale(scale_factor, center=[0, 0, 0])  # Scale around the new origin    
+        return mean_shape
+    
+
+    def denormalize_for_inference(self, pcd, scale_factors):
+        aabb_center= scale_factors[0]
+        scale_factor = scale_factors[1]
+        # Inverse the scaling
+        pcd.scale(1/scale_factor, center=[0, 0, 0])
+        # Inverse the translation
+        pcd= pcd.translate(aabb_center)
+        
+        return pcd
+    
+
+    def normalize_bounding_box(self, global_normalization, pca_input):
+        # culate the axis-aligned bounding box
+        aabb_center = global_normalization[0]
+        scale_factor= global_normalization[1]
+        pca_input.translate(-aabb_center)    
+        # pca_recon.translate(-aabb_center)
+        # Calculate extents of the bounding box
+        # Apply the scaling
+        pca_input.scale(scale_factor, center=[0, 0, 0])  # Scale around the new origin    
+        # pca_recon.scale(scale_factor, center=[0, 0, 0])
+        return pca_input
+
+    def get_scale_factor(self, mean_shape_pcd):
+
+        aabb = mean_shape_pcd.get_axis_aligned_bounding_box()    
+        # Get the center of the bounding box
+        aabb_center = aabb.get_center()   
+
+
+        # Calculate extents of the bounding box
+        aabb_extent = aabb.get_extent()    
+        # Calculate the norm of the extents vector
+        norm_extent = np.linalg.norm(aabb_extent)    
+        # Determine the scaling factor as the reciprocal of the norm of the extents
+        scale_factor = 1 / norm_extent  
+
+
+
+        return (aabb_center, scale_factor)
+
+    
 
     def save_ssm(self, path: str) -> None:
         """

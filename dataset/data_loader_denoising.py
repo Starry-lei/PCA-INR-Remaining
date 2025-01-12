@@ -3,12 +3,13 @@
 import sys
 sys.path.append('..')
 import torch
+import glob
 import torch.utils.data as data
 from torch.utils.data import  Sampler
 import numpy as np
 import os
 import open3d as o3d
-from glob import glob
+# from glob import glob
 from torch.nn import functional as F
 from sklearn.preprocessing import StandardScaler
 from utils_ssm.SSM import *
@@ -258,7 +259,7 @@ class PCDataset(data.Dataset):
         PCAReconsPoints_noised=[]
         mu=0
         sigma=1
-        self.added_noise_dim= 200
+        self.added_noise_dim= args.added_noise_dim 
         self.theta_variance_more = self.precomputed_ssm.get_variance_num_modes(num_modes=self.num_nodes+self.added_noise_dim)
         self.theta_variance_more = self.theta_variance_more.reshape(-1, 1)
         self.theta_std_variance_more = np.sqrt(self.theta_variance_more)
@@ -329,21 +330,366 @@ class PCDataset(data.Dataset):
 
         self.pca_recons_points= np.array(PCAReconsPoints)
         self.PCAReconsPoints_noised=np.array(PCAReconsPoints_noised)
-        losses = np.array(list(self.names_loss.values())).reshape(-1, 1)
-        # Define percentile thresholds for 40/40/20 split
-        p40 = np.percentile(losses, 40)  # Easy threshold
-        p80 = np.percentile(losses, 80)  # Medium threshold
-        easy_samples = {}
-        medium_samples = {}
-        hard_samples = {}
+        # losses = np.array(list(self.names_loss.values())).reshape(-1, 1)
+        # # Define percentile thresholds for 40/40/20 split
+        # p40 = np.percentile(losses, 40)  # Easy threshold
+        # p80 = np.percentile(losses, 80)  # Medium threshold
+        # easy_samples = {}
+        # medium_samples = {}
+        # hard_samples = {}
+        # for name, loss in self.names_loss.items():
+        #     if loss <= p40:
+        #         easy_samples[name] = loss
+        #     elif loss <= p80:
+        #         medium_samples[name] = loss
+        #     else:
+        #         hard_samples[name] = loss
 
-        for name, loss in self.names_loss.items():
-            if loss <= p40:
-                easy_samples[name] = loss
-            elif loss <= p80:
-                medium_samples[name] = loss
-            else:
-                hard_samples[name] = loss
+        
+
+
+    def get_scale_factor(self, mean_shape_pcd):
+
+        aabb = mean_shape_pcd.get_axis_aligned_bounding_box()    
+        # Get the center of the bounding box
+        aabb_center = aabb.get_center()   
+
+
+        # Calculate extents of the bounding box
+        aabb_extent = aabb.get_extent()    
+        # Calculate the norm of the extents vector
+        norm_extent = np.linalg.norm(aabb_extent)    
+        # Determine the scaling factor as the reciprocal of the norm of the extents
+        scale_factor = 1 / norm_extent  
+
+
+
+        return (aabb_center, scale_factor)
+
+    def denormalize_for_inference(self, pcd, scale_factors):
+    
+        aabb_center= scale_factors[0]
+        scale_factor = scale_factors[1]
+        # Inverse the scaling
+        pcd.scale(1/scale_factor, center=[0, 0, 0])
+        # Inverse the translation
+        pcd= pcd.translate(aabb_center)
+        
+        return pcd
+    
+    def get_global_normalization(self):
+        return self.global_normalization
+
+
+    def combinations_to_idx(self, i, j):
+        """Convert a pair of indices to a linear index."""
+        idx = i * self.data_length + j
+        if hasattr(idx, "__len__"):
+            idx = np.array(idx, dtype=int)
+        else:
+            idx = int(idx)
+        return idx
+    
+    def idx_to_combinations(self, idx):
+        """Convert s linear index to a pair of indices."""
+        i = np.floor(idx / self.data_length)
+        j = idx - i * self.data_length
+        if hasattr(idx, "__len__"):
+            i = np.array(i, dtype=int)
+            j = np.array(j, dtype=int)
+        else:
+            i = int(i)
+            j = int(j)
+        return i, j
+
+
+    def __getitem__(self, index):
+
+        # Variance explained by first 16 modes: 98.5775%
+
+        # i, j = self.idx_to_combinations(index)
+
+
+        pca_input = self.pca_input_points_sets[index]
+        name = self.names[index]
+        pca_recon = self.pca_recons_points[index]
+        pca_theta = self.pca_theta_sets[index]
+        gt_5k_points= self.gt_5k_points_sets[index]
+        pca_noised_recon= self.PCAReconsPoints_noised[index]
+
+        # pca_input_j = self.pca_input_points_sets[j]
+        # name_j = self.names[j]
+        # pca_recon_j = self.pca_recons_points[index]
+        # pca_theta_j = self.pca_theta_sets[j]
+    
+        pca_input = torch.from_numpy(pca_input).float()
+        pca_recon = torch.from_numpy(pca_recon).float()
+        pca_theta = torch.from_numpy(pca_theta).float()
+        gt_5k_points= torch.from_numpy(gt_5k_points).float()
+        pca_noised_recon=torch.from_numpy(pca_noised_recon).float()
+        pca_theta = pca_theta.T
+        shape_idx= torch.tensor(index, dtype=torch.long)
+
+        
+
+        # pca_input_j = torch.from_numpy(pca_input_j).float()
+        # # pca_recon = torch.from_numpy(pca_recon).float()
+        # pca_theta_j = torch.from_numpy(pca_theta_j).float()
+        # pca_theta_j = pca_theta_j.T
+        # shape_idx_j= torch.tensor(j, dtype=torch.long)
+        # print("shape_idx",shape_idx)
+        # print("shape_idx_j",shape_idx_j)
+        # exit()
+
+        # return shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j
+        return shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon
+
+    def __len__(self):
+        return len(self.pca_input_points_sets)
+    
+
+
+class inferPCDataset(data.Dataset):
+    def __init__(self, args, set_type='val'):
+
+        
+        self.data_path = os.path.join(args.dataset) 
+
+        if not os.path.exists(args.work_dir):
+            os.makedirs(args.work_dir)
+
+
+        self.labels_path= os.path.join(self.data_path, 'labels/labels.npy') 
+        self.plys_path= os.path.join(self.data_path, 'plys/') 
+        self.thetas_path= os.path.join(self.data_path, 'thetas/') 
+
+        self.labels= np.load(self.labels_path)
+        dataset_len= len(self.labels)
+       
+  
+        self.thetas= []
+
+        for index in range(0, dataset_len):
+            labels= self.labels[index]
+            # print("show labels:",labels)# [2 4 1 3]
+
+            pattern = f"{index}_*.npy"
+            cur_thetas_path = glob.glob(os.path.join(self.thetas_path, pattern))
+            # print("self.thetas_path:",cur_thetas_path)
+            thetas_shape= np.load(cur_thetas_path[0])
+            self.thetas.append(thetas_shape)
+
+            # print("show shape of thetas_shape:",thetas_shape.shape)
+
+            # # thetas_name= str(index)+"_"+"*.npy"
+            # # thetas_path= os.path.join(self.thetas_path, )
+            # # print("self.thetas_path:",self.thetas_path)
+
+            # exit()
+
+        self.thetas= np.array(self.thetas)
+
+
+
+
+
+        # # print("show (np.load(self.corrVertsPath)).shape[1]:",(np.load(self.corrVertsPath)).shape[1])
+        # # print("show len(self.data_files):",len(self.data_files))
+        # # exit()
+        # if not os.path.exists(self.corrVertsPath):
+        #     saveCorrespondence(self.data_path, self.corrVertsPath)
+        # # elif len(self.data_files) != (np.load(self.corrVertsPath)).shape[0]:
+        # #     saveCorrespondence(self.data_path, self.corrVertsPath)
+        # corresponded_train_verts, n_particles = get_correspondended_vertices(None, path=self.corrVertsPath)
+        # self.raw_data_matrix = np.transpose(corresponded_train_verts, (1, 0))
+        # self.mean_shape_flat = np.mean(self.raw_data_matrix, 0)
+        # self.mean_shape = self.mean_shape_flat.reshape(self.num_points, 3)
+        # # perform clustering over the mean shape
+        # # clustering the mean shape:
+        # labels = cluster_points(self.mean_shape, method='kmeans', n_clusters=self.n_clusters)  
+        # self.mean_shape_point_labels= labels  
+        # unique_labels, label_counts = np.unique(labels, return_counts=True)
+        # print("unique_labels:",unique_labels)# [0 1 2 3]
+        # print("label_counts:", label_counts) # 282, 227，287，228
+        # points_with_labels = np.column_stack((self.mean_shape, labels))
+        # combined_path = "chair_leg_points_with_labels_"+str(self.n_clusters)+".txt"
+        # combined_file_path = os.path.join(args.dataset, combined_path)
+        # if not os.path.exists(combined_file_path):
+        #     np.savetxt(combined_file_path, points_with_labels)
+        # # mask_cluster_0 = points_with_labels[:, 3] == 0
+
+        # self.mask_clusters= [ points_with_labels[:, 3] == i for i in range(self.n_clusters)]
+        # # print("shape of mask_clusters:",len(mask_clusters)) # 4    
+        # # print("mask_cluster_0:",mask_cluster_0.shape) # (1024,)
+        # # # num_points_cluster_0 = np.sum(mask_cluster_0) # 282
+        # # # print("num_points_cluster_0:",num_points_cluster_0)
+        # # exit()
+
+
+        # masked_pc = points_with_labels[points_with_labels[:, 3] == labels[0]]
+        # points = masked_pc[:, :3]
+
+
+        # # exit()
+        # self.mean_shape_pcd = o3d.geometry.PointCloud()
+        # self.mean_shape_pcd.points = o3d.utility.Vector3dVector(self.mean_shape)
+        # self.global_normalization = self.get_scale_factor( self.mean_shape_pcd)
+        # self.normalized_mean_shape_pcd = normalize_mean_shape(self.global_normalization, self.mean_shape_pcd)
+
+        # # normalize all input shapes
+        # print(f"Loading {set_type} data")
+        # print(self.data_path)# dataset/part_chair_leg_pca64
+        # self.pca_input_points_sets = []
+        # self.gt_5k_points_sets = []
+        # self.pca_recon_points_sets = []
+        # self.pca_scales_sets = []
+        # self.pca_theta_sets= []
+        # self.names = []
+
+
+        # for file in self.data_files:
+
+        #     data_pca_input = self.data_path + file   
+        #     pca_input_points = np.asarray(np.loadtxt(data_pca_input))
+
+        #     data_gt_points_path= self.gt_points_path+file
+        #     data_gt_points= np.asarray(np.loadtxt(data_gt_points_path))
+
+        #     # normalization here # TODO: change this
+        #     pca_input_points_pcd = o3d.geometry.PointCloud()
+        #     data_gt_points_pcd = o3d.geometry.PointCloud()
+        #     pca_input_points_pcd.points = o3d.utility.Vector3dVector(pca_input_points)
+        #     data_gt_points_pcd.points= o3d.utility.Vector3dVector(data_gt_points)
+        #     pca_input_points_pcd = normalize_bounding_box(self.global_normalization , pca_input_points_pcd)
+        #     data_gt_points_pcd = normalize_bounding_box(self.global_normalization , data_gt_points_pcd)
+
+
+        #     self.pca_input_points_sets.append(np.asarray(pca_input_points_pcd.points))
+        #     self.gt_5k_points_sets.append(np.asarray(data_gt_points_pcd.points))
+        #     self.names.append(file.replace(".txt", ""))
+
+        # self.pca_input_points_sets_pca= np.array(self.pca_input_points_sets)
+        # self.pca_input_points_sets_pca_flat= self.pca_input_points_sets_pca.reshape(self.pca_input_points_sets_pca.shape[0], -1)
+        
+        
+        # self.precomputed_ssm = SSM(self.pca_input_points_sets_pca_flat)
+
+
+        # self.theta_variance = self.precomputed_ssm.get_variance_num_modes(num_modes=self.num_nodes)
+        # self.theta_variance = self.theta_variance.reshape(-1, 1)
+        # self.theta_std_dev = np.sqrt(self.theta_variance)
+
+
+
+        # self.basis_evecs = self.precomputed_ssm.modes_norm[:, :self.num_nodes] if self.num_nodes else self.precomputed_ssm.modes_norm
+        
+        # precomputed_pca = {
+        #     "theta_std_dev": self.theta_std_dev,
+        #     "basis_evecs": self.basis_evecs
+        # }
+        # if not os.path.exists(self.preComputedPCA):
+        #     np.save(self.preComputedPCA, precomputed_pca)
+                
+        # print("show shape of self.theta_std_dev: ",self.theta_std_dev.shape)#  (64, 1)
+        # print("show shape of self.basis_evecs:", self.basis_evecs.shape)# (3072, 64)
+
+        # num_interpolations = 5
+
+        # PCAReconsPoints=[]
+        
+        # max_loss= 0
+        # self.names_loss ={}
+
+        # # add 16-> add 16 more
+        # PCAReconsPoints_noised=[]
+        # mu=0
+        # sigma=1
+        # self.added_noise_dim= args.added_noise_dim 
+        # self.theta_variance_more = self.precomputed_ssm.get_variance_num_modes(num_modes=self.num_nodes+self.added_noise_dim)
+        # self.theta_variance_more = self.theta_variance_more.reshape(-1, 1)
+        # self.theta_std_variance_more = np.sqrt(self.theta_variance_more)
+
+        # save_pca_recons_noised_path= os.path.join(args.dataset, "pca_recons_noised"+str(self.num_nodes+self.added_noise_dim))
+        # if not os.path.exists(save_pca_recons_noised_path):
+        #     os.makedirs(save_pca_recons_noised_path)
+
+
+
+        # residual_data_matrix=[]
+
+    
+        # for index, normalzied_input in enumerate(self.pca_input_points_sets):
+        #     # print("see shape of normalzied_input:",normalzied_input.shape)# (1024, 3)
+        #     pcd_view = o3d.geometry.PointCloud()
+        #     pcd_view.points = o3d.utility.Vector3dVector(normalzied_input)
+
+        #     loss = F.mse_loss(torch.tensor(normalzied_input), torch.tensor(self.mean_shape), reduction='mean')
+       
+        #     if loss.item() > max_loss:
+        #         max_loss= loss.item()
+        #     self.names_loss[self.names[index]]= loss.item()
+
+        #     theta_vector = self.precomputed_ssm.get_theta(normalzied_input, self.num_nodes)            
+        #     # whiting/sphere
+        #     theta_normalized = theta_vector / self.theta_std_dev
+        #     self.pca_theta_sets.append(theta_normalized)
+        #     checkReconsPC = self.precomputed_ssm.theta_to_shape_norm(theta_vector, self.num_nodes)
+
+        #     res= normalzied_input-checkReconsPC
+
+        #     # print("show shape of res:",res.shape)
+
+
+        #     residual_data_matrix.append(res)
+
+        #     noise = np.random.normal(loc=mu, scale=sigma, size=(self.added_noise_dim,1))
+        #     # print("show shape of theta_normalized:",theta_normalized.shape)
+        #     # print("show shape of theta_normalized:",noise.shape)
+        #     theta_normalized_noised = np.concatenate([theta_normalized,noise],axis=0 )
+
+        #     # print("show shape of theta_normalized_noised:",theta_normalized_noised.shape)
+        #     # print("show shape of self.theta_std_variance_more:",self.theta_std_variance_more.shape)
+        #     checkReconsPC_noised = self.precomputed_ssm.theta_to_shape_norm(theta_normalized_noised*self.theta_std_variance_more, self.num_nodes+self.added_noise_dim)
+ 
+        #     checkReconsPC_pcd = o3d.geometry.PointCloud()
+        #     checkReconsPC_pcd.points = o3d.utility.Vector3dVector(checkReconsPC)
+
+        #     checkReconsPC_noised_pcd= o3d.geometry.PointCloud()
+        #     checkReconsPC_noised_pcd.points= o3d.utility.Vector3dVector(checkReconsPC_noised)
+
+
+        #     save_name= str(self.names[index])+"_"+str(self.num_nodes)+".ply"
+        #     save_name_path= os.path.join(save_pca_recons_path, save_name)
+        #     save_name_noised_path= os.path.join(save_pca_recons_noised_path, save_name)
+        #     if not os.path.exists(save_name_path):
+
+        #         checkReconsPC_pcd_denormalized= self.denormalize_for_inference(checkReconsPC_pcd,self.global_normalization)
+        #         o3d.io.write_point_cloud(save_name_path, checkReconsPC_pcd_denormalized)
+
+        #     if not os.path.exists(save_name_noised_path):
+        #         checkReconsPC_noised_pcd_denormalized= self.denormalize_for_inference(checkReconsPC_noised_pcd, self.global_normalization)
+        #         o3d.io.write_point_cloud(save_name_noised_path, checkReconsPC_noised_pcd_denormalized)
+        #     PCAReconsPoints.append(checkReconsPC)
+        #     PCAReconsPoints_noised.append(checkReconsPC_noised)
+
+
+        # self.pca_recons_points= np.array(PCAReconsPoints)
+        # self.PCAReconsPoints_noised=np.array(PCAReconsPoints_noised)
+        # # losses = np.array(list(self.names_loss.values())).reshape(-1, 1)
+        # # # Define percentile thresholds for 40/40/20 split
+        # # p40 = np.percentile(losses, 40)  # Easy threshold
+        # # p80 = np.percentile(losses, 80)  # Medium threshold
+        # # easy_samples = {}
+        # # medium_samples = {}
+        # # hard_samples = {}
+
+        # # for name, loss in self.names_loss.items():
+        # #     if loss <= p40:
+        # #         easy_samples[name] = loss
+        # #     elif loss <= p80:
+        # #         medium_samples[name] = loss
+        # #     else:
+        # #         hard_samples[name] = loss
 
         
 
@@ -410,26 +756,34 @@ class PCDataset(data.Dataset):
 
         # i, j = self.idx_to_combinations(index)
 
+        labels= self.labels[index]
+        thetas= self.thetas[index]
 
-        pca_input = self.pca_input_points_sets[index]
-        name = self.names[index]
-        pca_recon = self.pca_recons_points[index]
-        pca_theta = self.pca_theta_sets[index]
-        gt_5k_points= self.gt_5k_points_sets[index]
-        pca_noised_recon= self.PCAReconsPoints_noised[index]
+        labels= torch.tensor(labels, dtype=torch.long)
+        thetas= torch.from_numpy(thetas).float()
+
+
+
+
+        # pca_input = self.pca_input_points_sets[index]
+        # name = self.names[index]
+        # pca_recon = self.pca_recons_points[index]
+        # pca_theta = self.pca_theta_sets[index]
+        # gt_5k_points= self.gt_5k_points_sets[index]
+        # pca_noised_recon= self.PCAReconsPoints_noised[index]
 
         # pca_input_j = self.pca_input_points_sets[j]
         # name_j = self.names[j]
         # pca_recon_j = self.pca_recons_points[index]
         # pca_theta_j = self.pca_theta_sets[j]
     
-        pca_input = torch.from_numpy(pca_input).float()
-        pca_recon = torch.from_numpy(pca_recon).float()
-        pca_theta = torch.from_numpy(pca_theta).float()
-        gt_5k_points= torch.from_numpy(gt_5k_points).float()
-        pca_noised_recon=torch.from_numpy(pca_noised_recon).float()
-        pca_theta = pca_theta.T
-        shape_idx= torch.tensor(index, dtype=torch.long)
+        # pca_input = torch.from_numpy(pca_input).float()
+        # pca_recon = torch.from_numpy(pca_recon).float()
+        # pca_theta = torch.from_numpy(pca_theta).float()
+        # gt_5k_points= torch.from_numpy(gt_5k_points).float()
+        # pca_noised_recon=torch.from_numpy(pca_noised_recon).float()
+        # pca_theta = pca_theta.T
+        # shape_idx= torch.tensor(index, dtype=torch.long)
 
         
 
@@ -441,12 +795,11 @@ class PCDataset(data.Dataset):
         # print("shape_idx",shape_idx)
         # print("shape_idx_j",shape_idx_j)
         # exit()
-
         # return shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j
-        return shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon
-
+        return labels, thetas
+    
     def __len__(self):
-        return len(self.pca_input_points_sets)
+        return len(self.labels)
     
 
 class PCDValataset(data.Dataset):

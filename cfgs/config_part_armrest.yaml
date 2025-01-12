@@ -1,0 +1,54 @@
+!munch.Munch
+dataset: dataset/part_chair_armrest_pca64
+work_dir: exp_shapeNet_chair_armrest/
+batch_size: 16
+model_name: point2ssm # displacement_low_dim_denoiser # displacement_MHA_flow  # displacement_flow # displacement_flow_High_low_latent # displacement_res_deform
+device: cuda:0
+epochs: 2000
+added_noise_dim: 1500
+coarse_to_fine: False
+encoder: dgcnn
+alpha: 0.01
+lat_dims: 64 # 64
+lat_high_freq_dims: 8 # 64
+local_dim: 64
+latent_dim: 128
+num_input_points: 1024
+num_output_points: 1024
+deformer_nf: 64 # 80? 96? 128?
+guidance_interpolation: 2
+n_clusters: 4
+solver: 'dopri5'
+adjoint: True
+arch: "imnet" # "imnet"
+nonlin: 'leakyrelu'
+rtol: 0.0001
+atol: 0.0001
+via_hub: False
+symm: False
+return_waypoints: False
+use_latent_waypoints: False
+
+
+loss: cd_t
+nepoch: 3000
+early_stop: True
+early_stop_patience: 100
+early_stop_start: 0
+
+optimizer: AdamW
+betas: 0.9, 0.999
+lr: 0.0001
+lr_decay: False
+
+manual_seed: 42
+weight_decay: 0
+workers: 0
+
+epoch_interval_to_save: 10
+epoch_interval_to_val: 1
+step_interval_to_print: 400
+
+save_predictions: true
+load_model: null
+start_epoch: 0

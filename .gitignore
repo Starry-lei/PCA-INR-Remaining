@@ -9,12 +9,23 @@ dataset/part_chair_leg_pca64.zip
 best_model_weights.pth
 dataset/pretrained_ckpt/
 testShapes/
+dataset/part_chair_seat_pca64/
+exp_shapeNet_chair_armrest/
+exp_shapeNet_chair_back/
+exp_shapeNet_chair_seat/
+generated_data_refine/
 bug_handling/
 bug_handling_un_symm/
 torchdiffeq-master/
+dataset/part_chair_armrest_pca64.zip
+dataset/part_chair_armrest_pca64/
+dataset/part_chair_back_pca64.zip
+dataset/part_chair_back_pca64/
+dataset/part_chair_leg.zip
+dataset/part_chair_seat_pca64.zip
 bug_handling copy/
 bug_handling_no_c2f/
-
+best_model_weights.pth
 temp_folder/
 test.py
 test_pcd/

@@ -84,7 +84,7 @@ class Model(nn.Module):
 
         return neighbor_loss
 
-    def forward(self, x, gt, is_training=True):
+    def forward(self, x, gt=None, is_training=True):
         z, features = self.encoder(x)
 
         if self.encoder_name == 'dgcnn':
@@ -98,22 +98,14 @@ class Model(nn.Module):
             # cd_p, cd_t = criterion_mse(pred, gt)
             # loss_mse = criterion_mse(pred, gt)
             cd_p, cd_t = calc_cd(pred, gt)
-
-
             recon_loss = cd_t
-
-
-            # recon_loss=  mean_flat(loss_mse)
-            
-
+            # recon_loss=  mean_flat(loss_mse)            
             neigh_loss = self.get_neighbor_loss(pred, 10)
-
             loss= mean_flat(recon_loss) + self.alpha * mean_flat(neigh_loss)
             return pred, loss
         else:
-            # cd_p, cd_t = calc_cd(pred, gt)
-            loss_mse = criterion_mse(pred, gt)
-            return {'recon': pred,'loss_mse': loss_mse}
+   
+            return pred
 
     def get_prob_map(self, x):
         z, features = self.encoder(x)

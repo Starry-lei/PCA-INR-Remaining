@@ -4,7 +4,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1,VRAM:30G
 #SBATCH --mem=30G
-#SBATCH --exclude=node[11,12]
+#SBATCH --exclude=node[11,13]
 #SBATCH --constraint="GPU_GEN:AMPERE|GPU_GEN:TURING"
 #SBATCH --time=60:30:00
 #SBATCH --mail-user="ge23yat@mytum.de"
@@ -24,7 +24,7 @@
 
 
 # Start tmux
-tmux new -d -s "INR"
+tmux new -d -s "part_denoiser"
 # Run tmux commands to setup the session
 tmux split-window -h # this will setup two panes, splitting the screen horizontally
 # srun --jobid 1171741 --pty tmux a -t backrest
@@ -56,5 +56,5 @@ sleep 24h
 
 # scancel 1273195
 # sbatch train.sbatch
-# srun --jobid 1308821 --pty tmux a -t INR
+# srun --jobid 1313223 --pty tmux a -t part_denoiser
 #  squeue -u chengl

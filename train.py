@@ -452,5 +452,5 @@ def main():
 
 if __name__ == '__main__':
     # conda activate diffTheta
-    # python train.py -c cfgs/config.yaml
+    # python train.py -c cfgs/config_part_back.yaml
     main()
