@@ -1,8 +1,8 @@
 !munch.Munch
 dataset: dataset/part_chair_leg_pca64
 work_dir: exp_shapeNet_chair_leg/
-batch_size: 16
-model_name: point2ssm # displacement_low_dim_denoiser # displacement_MHA_flow  # displacement_flow # displacement_flow_High_low_latent # displacement_res_deform
+batch_size: 32
+model_name: pure_mlp # point2ssm_mse # point2ssm  # displacement_flow # displacement_flow_High_low_latent # displacement_res_deform
 device: cuda:0
 epochs: 2000
 added_noise_dim: 1500
@@ -13,6 +13,7 @@ lat_dims: 64 # 64
 lat_high_freq_dims: 8 # 64
 local_dim: 64
 latent_dim: 128
+num_layers: 4
 num_input_points: 1024
 num_output_points: 1024
 deformer_nf: 64 # 80? 96? 128?
@@ -50,5 +51,5 @@ epoch_interval_to_val: 1
 step_interval_to_print: 400
 
 save_predictions: true
-load_model: null
+load_model: "/home/stud/chengl/storage/user/PCA-INR-Remaining/exp_shapeNet_chair_leg/dataset/part_chair_leg_pca64/pure_mlp_dgcnn_2025-02-04T22-45-43/latest_model_weights.pth"
 start_epoch: 0

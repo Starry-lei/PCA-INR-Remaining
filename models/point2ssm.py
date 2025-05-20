@@ -7,11 +7,11 @@ import torch.nn.functional as F
 from models.dgcnn import DGCNN_encoder
 # from utils.model_utils import calc_cd
 from torch_cluster import knn
-import xformers.ops
+# import xformers.ops
 import os
 import time
 import sys
-
+# from flash_attn.modules.mha import MHA
 proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(os.path.join(proj_dir, "utils/Pointnet2.PyTorch/pointnet2"))
 from pointnet2_utils import grouping_operation
@@ -100,8 +100,8 @@ class Model(nn.Module):
             cd_p, cd_t = calc_cd(pred, gt)
             recon_loss = cd_t
             # recon_loss=  mean_flat(loss_mse)            
-            neigh_loss = self.get_neighbor_loss(pred, 10)
-            loss= mean_flat(recon_loss) + self.alpha * mean_flat(neigh_loss)
+            # neigh_loss = self.get_neighbor_loss(pred, 10) #10
+            loss= mean_flat(recon_loss) #+ self.alpha * mean_flat(neigh_loss)
             return pred, loss
         else:
    
@@ -142,45 +142,6 @@ class Attention_Module(nn.Module):
         return prob_map
 
 
-class MultiHeadCrossAttention(nn.Module):
-    def __init__(self, d_model, num_heads, attn_drop=0., proj_drop=0., **block_kwargs):
-        super(MultiHeadCrossAttention, self).__init__()
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
-
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.head_dim = d_model // num_heads
-
-        self.q_linear = nn.Linear(d_model, d_model)
-        self.kv_linear = nn.Linear(d_model, d_model * 2)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(d_model, d_model)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x, cond, mask=None):
-        # query/value: img tokens; key: condition; mask: if padding tokens
-        B, N, C = x.shape
-        # print("*-*-*---*-*---**--*-*---**--*-*---**--*-*---**--*-*---**--*-*---**-*-*-checking B, N ,C:",B, N, C )#  B, N ,C: 2048 8 2048
-        q = self.q_linear(x).view(1, -1, self.num_heads, self.head_dim)
-        kv = self.kv_linear(cond).view(1, -1, 2, self.num_heads, self.head_dim)
-        k, v = kv.unbind(2)
-
-        # print("shape of  q==========:",q.shape) # torch.Size([1, 16384, 8, 256])
-        # print("shape of  k==========:",k.shape) # torch.Size([1, 16384, 8, 256])
-        # print("shape of  v==========:",v.shape) # torch.Size([1, 16384, 8, 256])
-
-        attn_bias = None
-
-        # # print("showing shape of attn_bias:",attn_bias.shape)
-        x = xformers.ops.memory_efficient_attention(q, k, v, p=self.attn_drop.p, attn_bias=attn_bias)
-
-        # print("check the shape after cross attention x:", x.shape) # torch.Size([1, 11, 16, 32])
-        x = x.view(B, -1, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-
 # PointAttN: You Only Need Attention for Point Cloud Completion
 # https://github.com/ohhhyeahhh/PointAttN
 class cross_transformer(nn.Module):
@@ -188,6 +149,7 @@ class cross_transformer(nn.Module):
         super().__init__()
         self.multihead_attn1 = nn.MultiheadAttention(d_model_out, nhead, dropout=dropout)
         # self.cross_attn = MultiHeadCrossAttention(d_model_out, nhead, attn_drop=dropout)
+        # self.multihead_attn1 = FlashAttentionCrossAttention(d_model_out, nhead, dropout=dropout)
         # Implementation of Feedforward model
         self.linear11 = nn.Linear(d_model_out, dim_feedforward)
         self.dropout1 = nn.Dropout(dropout)
@@ -222,11 +184,7 @@ class cross_transformer(nn.Module):
         src12 = self.multihead_attn1(query=src1,
                                      key=src2,
                                      value=src2)[0]
-
-        # print("********************************************************see shape of src1:",src1.shape)
-        # print("********************************************************see shape of src2:",src2.shape)
-
-        # src12 = self.cross_attn(x=src1, cond=src2)
+        
 
         src1 = src1 + self.dropout12(src12)
         src1 = self.norm12(src1)

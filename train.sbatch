@@ -4,9 +4,9 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:1,VRAM:30G
 #SBATCH --mem=30G
-#SBATCH --exclude=node[11,13]
+#SBATCH --exclude=node[13,14,17,18]
 #SBATCH --constraint="GPU_GEN:AMPERE|GPU_GEN:TURING"
-#SBATCH --time=60:30:00
+#SBATCH --time=30:30:00
 #SBATCH --mail-user="ge23yat@mytum.de"
 #SBATCH --mail-type=BEGIN,END
 #SBATCH --output=/home/stud/chengl/storage/user/PCA-INR-Remaining/Training/slurm_output/slurm-%j.out
@@ -31,7 +31,7 @@ tmux split-window -h # this will setup two panes, splitting the screen horizonta
 
 nvidia-smi
 # Finally, make job wait for user to connected
-sleep 24h
+sleep 30h
 
 
 # |GPU_GEN:TURING
@@ -56,5 +56,5 @@ sleep 24h
 
 # scancel 1273195
 # sbatch train.sbatch
-# srun --jobid 1313223 --pty tmux a -t part_denoiser
+# srun --jobid 1327792 --pty tmux a -t part_denoiser
 #  squeue -u chengl

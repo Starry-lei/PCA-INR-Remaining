@@ -1,0 +1,125 @@
+!munch.Munch
+dataset: dataset/denoiser_dataset
+work_dir: exp_shapeNet_shape_lvl/
+batch_size: 20
+model_name: point2ssm # point2ssm # pointsdenoiser  # pointTr # PointTransformerEncoderEntry # displacement_res_deform
+device: cuda #cuda:0
+epochs: 2000
+added_noise_dim: 1500
+coarse_to_fine: False
+encoder: dgcnn #local_pool_pointnet # dgcnn # PointTransformerEncoderEntry
+distributed: True
+alpha: 0.00001 # 0.0005
+lat_dims: 64 # 64
+lat_high_freq_dims: 8 # 64
+local_dim: 64
+latent_dim: 128
+num_input_points: 2048
+num_output_points: 2048 # 4096 #2048# 4096?
+
+
+encoder_config: {
+      embed_dim: 384,
+      depth: 6,
+      num_heads: 6,
+      k: 8,
+      n_group: 2,
+      mlp_ratio: 2.,
+      block_style_list: ['attn-graph', 'attn', 'attn', 'attn', 'attn', 'attn'], 
+      combine_style: 'concat',
+    }
+
+data:
+  dataset: Shapes3D
+  path: data/ShapeNet
+  class: null
+  data_type: psr_full
+  input_type: pointcloud
+  dim: 3
+  num_points: 2048
+  num_gt_points: 5000
+  num_offset: 1
+  img_size: null
+  n_views_input: 20
+  n_views_per_iter: 2
+  pointcloud_noise: 0
+  pointcloud_file: pointcloud.npz
+  pointcloud_outlier_ratio: 0
+  fixed_scale: 0
+  train_split: train
+  val_split: val
+  test_split: test
+  points_file: null
+  points_iou_file: points.npz
+  points_unpackbits: true
+  padding: 0.01
+  multi_files: null
+  gt_mesh: null
+  zero_level: 0
+  only_single: False
+  sample_only_floor: False
+
+
+model:
+  grid_res: 128 # poisson grid resolution
+  local_coord: True
+  psr_sigma: 2
+  psr_tanh: True
+  normal_normalize: False
+  predict_normal: True
+  predict_offset: True
+  c_dim: 32
+  s_offset: 0.001
+  encoder: local_pool_pointnet
+  encoder_kwargs:
+    hidden_dim: 32
+    plane_type: 'grid'
+    grid_resolution: 32
+    unet3d: True
+    unet3d_kwargs:
+      num_levels: 3
+      f_maps: 32
+      in_channels: 32
+      out_channels: 32
+  decoder: simple_local
+  decoder_kwargs:
+    sample_mode: bilinear # bilinear / nearest
+    hidden_size: 32
+
+
+deformer_nf: 64 # 80? 96? 128?
+guidance_interpolation: 2
+n_clusters: 4
+solver: 'dopri5'
+adjoint: True
+arch: "imnet" # "imnet"
+nonlin: 'leakyrelu'
+rtol: 0.0001
+atol: 0.0001
+via_hub: False
+symm: False
+return_waypoints: False
+use_latent_waypoints: False
+
+loss: cd_t
+nepoch: 3000
+early_stop: True
+early_stop_patience: 100
+early_stop_start: 0
+
+optimizer: AdamW
+betas: 0.9, 0.999
+lr: 0.0001
+lr_decay: False
+
+manual_seed: 42
+weight_decay: 0
+workers: 0
+
+epoch_interval_to_save: 10
+epoch_interval_to_val: 1
+step_interval_to_print: 400
+
+save_predictions: true
+load_model: null
+start_epoch: 0

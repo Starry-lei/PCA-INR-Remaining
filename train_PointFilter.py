@@ -12,6 +12,7 @@ import torch
 import random
 import importlib
 import logging
+from sklearn.neighbors import NearestNeighbors
 import sys
 import torch.optim as optim
 import wandb
@@ -65,6 +66,92 @@ def mean_flat(tensor):
     Take the mean over all non-batch dimensions.
     """
     return tensor.mean(dim=list(range(1, len(tensor.shape))))
+
+def normalize_and_add_curvature_based_noise_tensor(points_tensor, 
+                                                   k=20, 
+                                                   noise_std_min=0.005, 
+                                                   noise_std_max=0.02, 
+                                                   scale_factor=15000):
+    """
+    For each point cloud in the batch:
+      1. Normalize the points by subtracting the center and dividing by the bounding sphere's radius.
+      2. Add curvature-based Gaussian noise. The base noise standard deviation is chosen 
+         randomly between noise_std_min and noise_std_max (which are fractions of the 
+         bounding sphere's radius). Then, each point’s noise is modulated by its local curvature.
+    
+    Parameters:
+        points_tensor (torch.Tensor): Input tensor of shape [b, 2048, 3].
+        k (int): Number of nearest neighbors for curvature estimation.
+        noise_std_min (float): Minimum fraction for base noise standard deviation.
+        noise_std_max (float): Maximum fraction for base noise standard deviation.
+        scale_factor (float): Factor to amplify the curvature values.
+    
+    Returns:
+        torch.Tensor: Noisy point clouds of shape [b, 2048, 3] (still normalized).
+    """
+    b, n, d = points_tensor.shape
+    assert d == 3, "Input tensor must be of shape [b, N, 3]."
+    
+    noisy_batch = []
+    
+    # Process each point cloud in the batch separately
+    for i in range(b):
+        # Convert the point cloud to a NumPy array
+        points = points_tensor[i].cpu().numpy()  # shape: [2048, 3]
+        
+        # --- Normalization Step ---
+        # Compute the center of the point cloud and subtract it
+        center = points.mean(axis=0)
+        points_centered = points - center
+        
+        # Compute the bounding sphere's radius (max Euclidean distance from the center)
+        distances = np.linalg.norm(points_centered, axis=1)
+        radius = distances.max()
+        
+        # Normalize the point cloud so that its bounding sphere has radius 1
+        points_normalized = points_centered / radius
+        
+        # --- Noise Injection Step ---
+        # Choose a base noise standard deviation randomly (as a fraction of the bounding sphere)
+        # Since the cloud is normalized, the base noise is directly in [0.005, 0.02]
+        base_noise = random.uniform(noise_std_min, noise_std_max)
+        
+        # For curvature-based noise, we modulate the noise per point using the local curvature.
+        # Find the k nearest neighbors for each point (using the normalized points)
+        nbrs = NearestNeighbors(n_neighbors=k, algorithm='auto').fit(points_normalized)
+        _, indices = nbrs.kneighbors(points_normalized)
+        
+        # Prepare an array to store the noise sigma for each point
+        noise_sigmas = np.zeros(points_normalized.shape[0])
+        
+        for j, neighbors in enumerate(indices):
+            # Extract the local neighborhood points
+            local_pts = points_normalized[neighbors]  # shape: [k, 3]
+            # Compute the 3x3 covariance matrix of the local neighborhood
+            cov = np.cov(local_pts.T)
+            # Compute eigenvalues (which np.linalg.eigh returns in ascending order)
+            eigenvalues, _ = np.linalg.eigh(cov)
+            # Use the smallest eigenvalue as a proxy for local flatness (or inversely, curvature)
+            curvature = eigenvalues[0]
+            # print("curvature:",curvature)
+            # Map curvature to noise amplitude:
+            # Higher curvature leads to a larger noise standard deviation.
+            noise_sigmas[j] = base_noise * (1 + curvature * scale_factor)
+        
+        # Generate noise for each point based on its computed sigma
+        noise = np.array([np.random.randn(3) * sigma for sigma in noise_sigmas])
+        # Add the noise to the normalized points
+        noisy_points = points_normalized + noise
+        
+        noisy_batch.append(noisy_points)
+    
+    # Stack the processed point clouds back into a tensor of shape [b, 2048, 3]
+    noisy_batch = np.stack(noisy_batch, axis=0)
+    noisy_tensor = torch.tensor(noisy_batch, dtype=points_tensor.dtype, device=points_tensor.device)
+    
+    return noisy_tensor
+
+
 
 def train(args, log_dir=None):
     if torch.cuda.is_available():
@@ -157,7 +244,7 @@ def train(args, log_dir=None):
 
 
     # load params:
-    load_params=  False # True
+    load_params=  True # True
     if load_params:
         path= "latest_model_weights.pth" # latest_model_weights # best_model_weights
         model.load_state_dict(torch.load(path))
@@ -168,6 +255,9 @@ def train(args, log_dir=None):
 
 
     global_step = 0
+
+    noise_std_min=0.005
+    noise_std_max=0.015
 
 
     # TODO:
@@ -188,18 +278,31 @@ def train(args, log_dir=None):
 
             shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon = data_tensors
             pca_noised_recon= pca_noised_recon.to(device)
+            pca_recon= pca_recon.to(device)
             pca_input= pca_input.to(device)
             gt_5k_points= gt_5k_points.to(device)
 
             # print("show points shape of gt_5k_points:",gt_5k_points.shape)
             # # torch.Size([4, 5000, 3])
 
+            pca_recon_noised_new = normalize_and_add_curvature_based_noise_tensor(pca_recon, k=20, noise_std_min=noise_std_min, noise_std_max=noise_std_max, scale_factor=10000)
+
+            # print("show shape of pca_recon_noised_new: ",pca_recon_noised_new.shape)
+            # # torch.Size([16, 1024, 3])
+            # print("show shape of pca_input: ",pca_input.shape)
+            # #  torch.Size([16, 1024, 3])
             # exit()
-            pred, loss_mse = model(pca_noised_recon, gt=gt_5k_points)
+
+            # pred, loss_mse = model(pca_noised_recon, gt=gt_5k_points)
+            # pred, loss_mse = model(pca_recon_noised_new, gt=pca_input)
+
+            pred = model(pca_recon_noised_new)
+            loss_mse= criterion_mse(pred,pca_input)
+
             loss= loss_mse.mean()
             # print("show loss:",loss)
             # exit()
-            if epoch_idx % 2 == 0:
+            if epoch_idx % 20 == 0:
                 predis_pred= pred[:4].detach().cpu().numpy()
                 print("show shape of predis_pred:",predis_pred.shape)# 4， 1024， 3
                 predis_pred[:,:, [1, 2]] = predis_pred[:,:, [2, 1]]
@@ -223,10 +326,21 @@ def train(args, log_dir=None):
             num_batches= len(dataloader_val)
             # print("num_batches:", num_batches)# 86
             for shape_idx, name, gt_5k_points, pca_recon, pca_input, pca_noised_recon in dataloader_val:
+                pca_recon= pca_recon.to(device)
+
+                # print("show shape of pca_recon:",pca_recon.shape)
+                # # torch.Size([32, 3])
+                # exit()
                 pca_noised_recon= pca_noised_recon.to(device)
                 pca_input= pca_input.to(device)
                 gt_5k_points= gt_5k_points.to(device)
-                pred, loss_mse = model(pca_noised_recon, gt=gt_5k_points)
+
+                pca_recon_noised_new = normalize_and_add_curvature_based_noise_tensor(pca_recon, k=20, noise_std_min=noise_std_min, noise_std_max=noise_std_max, scale_factor=10000)
+
+                # pred, loss_mse = model(pca_recon_noised_new, gt=pca_input)
+                pred = model(pca_recon_noised_new)
+                loss_mse= criterion_mse(pred,pca_input)
+
                 loss= loss_mse.mean()
                 # loss = loss_mse
                 val_loss += loss.item()
@@ -242,12 +356,6 @@ def train(args, log_dir=None):
 
         global_step += 1
         torch.save(model.state_dict(), latest_model_weights_path)
-
-
-    
-
-            
-
 
 
 def main():
@@ -280,37 +388,15 @@ def main():
     train(args, log_dir=log_dir)
 
 
-    #test() visualize the result
-
 if __name__ == '__main__':
+
     # conda activate freereg strucNet/ freereg
-    # python train_PointFilter.py -c cfgs/config.yaml
+    # python train_PointFilter.py -c cfgs/config.yaml # for leg
+
 
     # python train_PointFilter.py -c cfgs/config_part_back.yaml
     # python train_PointFilter.py -c cfgs/config_part_seat.yaml
-    # python train_PointFilter.py -c cfgs/config_part_armrest.yaml
+    # python train_PointFilter.py -c cfgs/infer_config_eva_cosine_decay
    
     main()
-
-
-
-
-
-
-#
- # points_transformed_vis= points_transformed[0]
-                # deformed_pts_vis= pred[0]
-                # deformed_pts_vis_np= deformed_pts_vis.detach().cpu().numpy()
-                # # points_transformed_vis_np= points_transformed_vis.detach().cpu().numpy()
-                # deformed_pts_vis_np_pcd= o3d.geometry.PointCloud()
-                # points_transformed_vis_np_pcd= o3d.geometry.PointCloud()
-                # deformed_pts_vis_np_pcd.points=o3d.utility.Vector3dVector(deformed_pts_vis_np)
-                # # points_transformed_vis_np_pcd.points=o3d.utility.Vector3dVector(points_transformed_vis_np)
-                # # o3d.visualization.draw_geometries([deformed_pts_vis_np_pcd])
-                # # o3d.visualization.draw_geometries([points_transformed_vis_np_pcd])
-                # # save the pcd:
-                # pcd_path= os.path.join(bug_handling,str(epoch_idx)+"_deformed_pts_vis_np_pcd.ply" )
-                # # points_transformed_vis_np_pcd_path= os.path.join(bug_handling,str(epoch_idx)+"_points_transformed_vis_np_pcd.ply" )
-                # o3d.io.write_point_cloud(pcd_path,deformed_pts_vis_np_pcd )
-                # # o3d.io.write_point_cloud(points_transformed_vis_np_pcd_path,points_transformed_vis_np_pcd )
 

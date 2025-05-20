@@ -114,6 +114,69 @@ def cluster_points(points, method='kmeans', n_clusters=4, eps=0.5, min_samples=5
     return labels
 
 
+def normalize_bounding_box_pcd(pcd):
+    # Calculate the axis-aligned bounding box
+    aabb = pcd.get_axis_aligned_bounding_box()    
+    # Get the center of the bounding box
+    aabb_center = aabb.get_center()    
+    # Translate the point cloud to center the bounding box at the origin
+    pcd.translate(-aabb_center)    
+    # Calculate extents of the bounding box
+    aabb_extent = aabb.get_extent()    
+    # Calculate the norm of the extents vector
+    norm_extent = np.linalg.norm(aabb_extent)    
+    # Determine the scaling factor as the reciprocal of the norm of the extents
+    scale_factor = 1 / norm_extent    
+    # Apply the scaling
+    pcd.scale(scale_factor, center=[0, 0, 0])  # Scale around the new origin    
+    return pcd
+
+
+
+def add_noise_to_normalized_pcd(pcd, noise_factor=0.01):
+    """
+    Add Gaussian noise to a normalized point cloud.
+    The noise standard deviation is computed as a fraction (noise_factor) of the bounding sphere's radius.
+    
+    Parameters:
+        pcd (open3d.geometry.PointCloud): A point cloud that is assumed to be normalized.
+        noise_factor (float): Fraction of the radius to set as the standard deviation for noise.
+                              For example, 0.01 means 1% of the bounding sphere's radius.
+    
+    Returns:
+        open3d.geometry.PointCloud: New point cloud with added noise.
+    """
+    # Convert the point cloud to a NumPy array
+    points = np.asarray(pcd.points)
+    
+    # Compute the center of the point cloud
+    center = points.mean(axis=0)
+    
+    # Calculate the Euclidean distances of all points from the center
+    distances = np.linalg.norm(points - center, axis=1)
+    
+    # Estimate the bounding sphere's radius as the maximum distance from the center
+    radius = distances.max()
+    
+    # Calculate the noise standard deviation as a fraction of the radius
+    sigma = noise_factor * radius
+    
+    # Generate Gaussian noise with mean 0 and standard deviation sigma
+    noise = np.random.randn(*points.shape) * sigma
+    
+    # Add the noise to the points
+    noisy_points = points + noise
+    
+    # Create a new point cloud for the noisy data
+    pcd_noisy = o3d.geometry.PointCloud()
+    pcd_noisy.points = o3d.utility.Vector3dVector(noisy_points)
+    
+    # If the original point cloud has colors, copy them as well
+    if pcd.has_colors():
+        pcd_noisy.colors = pcd.colors.copy()
+    
+    return pcd_noisy
+
 # part level dataset
 class PCDataset(data.Dataset):
     def __init__(self, args, set_type='val'):
@@ -448,6 +511,374 @@ class PCDataset(data.Dataset):
         return len(self.pca_input_points_sets)
     
 
+class shapelvlDataset(data.Dataset):
+    def __init__(self, args, set_type='val'):
+
+        # run dataloader for train, then val set
+
+        # self.data_path = os.path.join(args.dataset, set_type+'_set_whole/', "pcaRcons/") 
+        # # self.gt_points_path= os.path.join(args.dataset, set_type+'_set/', "gt_Input_10k/")
+        # self.gt_points_path= os.path.join(args.dataset, set_type+'_set_whole/', "gt_Input/") 
+
+
+        self.data_path = os.path.join(args.dataset, set_type+'_set/', "pcaRcons/") 
+        # self.gt_points_path= os.path.join(args.dataset, set_type+'_set/', "gt_Input_10k/")
+        self.gt_points_path= os.path.join(args.dataset, set_type+'_set/', "gt_Input/") 
+ 
+        self.num_points= args.num_input_points # 1024 
+ 
+        
+        self.data_files= sorted(os.listdir(self.data_path))
+        self.data_length = len(self.data_files)
+
+
+        self.pca_input_points_sets = []
+        self.gt_5k_points_sets = []
+        self.pca_recon_points_sets = []
+        self.pca_scales_sets = []
+        self.pca_theta_sets= []
+        self.names = []
+
+
+        for file in self.data_files:
+
+            data_pca_input = self.data_path + file   
+            # print("show val of data_pca_input:",data_pca_input)
+            # pca_input_points = np.asarray(np.loadtxt(data_pca_input))
+            # pca_input_points= pca_input_points[:,:3]
+            # pca_input_points = pca_input_points[~np.all(pca_input_points == 0, axis=1)]
+            # print("show shape of pca_input_points:",pca_input_points.shape)
+
+            # pcd = o3d.geometry.PointCloud()
+            # pcd.points = o3d.utility.Vector3dVector(pca_input_points)
+            # pca_input_points_smp = np.array(pcd.farthest_point_down_sample(2048).points)
+            # print("Sampled points shape:", pca_input_points_smp.shape)
+
+
+            # gt_file_name= file.replace("pca_recon_", "")
+            # data_gt_points_path= self.gt_points_path+gt_file_name
+            # data_gt_points= np.asarray(np.loadtxt(data_gt_points_path))
+            # # print("show shape of data_gt_points:",data_gt_points.shape)
+
+
+            # normalization here # TODO: change this
+            # pca_input_points_pcd = o3d.geometry.PointCloud()
+            # data_gt_points_pcd = o3d.geometry.PointCloud()
+            # pca_input_points_pcd.points = o3d.utility.Vector3dVector(pca_input_points_smp)
+            # data_gt_points_pcd.points= o3d.utility.Vector3dVector(data_gt_points)
+
+
+
+            # !!!!!!!!!!!!!!!!!!!!!!!
+            # not normalize here, we normalize and add noise before the model processing
+            # pca_input_points_pcd = normalize_bounding_box_pcd(pca_input_points_pcd)
+
+
+            # data_gt_points_pcd = normalize_bounding_box_pcd(data_gt_points_pcd)
+
+
+            # self.pca_input_points_sets.append(np.asarray(pca_input_points_pcd.points))
+            # self.gt_5k_points_sets.append(np.asarray(data_gt_points_pcd.points))
+            self.names.append(file.replace(".txt", ""))
+
+        # self.pca_input_points_sets_pca= np.array(self.pca_input_points_sets)
+        # self.pca_input_points_sets_pca_flat= self.pca_input_points_sets_pca.reshape(self.pca_input_points_sets_pca.shape[0], -1)
+        
+
+    def get_scale_factor(self, mean_shape_pcd):
+
+        aabb = mean_shape_pcd.get_axis_aligned_bounding_box()    
+        # Get the center of the bounding box
+        aabb_center = aabb.get_center()   
+
+
+        # Calculate extents of the bounding box
+        aabb_extent = aabb.get_extent()    
+        # Calculate the norm of the extents vector
+        norm_extent = np.linalg.norm(aabb_extent)    
+        # Determine the scaling factor as the reciprocal of the norm of the extents
+        scale_factor = 1 / norm_extent  
+
+
+
+        return (aabb_center, scale_factor)
+
+    def denormalize_for_inference(self, pcd, scale_factors):
+    
+        aabb_center= scale_factors[0]
+        scale_factor = scale_factors[1]
+        # Inverse the scaling
+        pcd.scale(1/scale_factor, center=[0, 0, 0])
+        # Inverse the translation
+        pcd= pcd.translate(aabb_center)
+        
+        return pcd
+    
+    def get_global_normalization(self):
+        return self.global_normalization
+
+
+    def combinations_to_idx(self, i, j):
+        """Convert a pair of indices to a linear index."""
+        idx = i * self.data_length + j
+        if hasattr(idx, "__len__"):
+            idx = np.array(idx, dtype=int)
+        else:
+            idx = int(idx)
+        return idx
+    
+    def idx_to_combinations(self, idx):
+        """Convert s linear index to a pair of indices."""
+        i = np.floor(idx / self.data_length)
+        j = idx - i * self.data_length
+        if hasattr(idx, "__len__"):
+            i = np.array(i, dtype=int)
+            j = np.array(j, dtype=int)
+        else:
+            i = int(i)
+            j = int(j)
+        return i, j
+
+
+    def __getitem__(self, index):
+
+
+        file_path= self.data_files[index]
+
+        data_pca_input = self.data_path + file_path
+        pca_input_points = np.asarray(np.loadtxt(data_pca_input))
+        pca_input_points= pca_input_points[:,:3]
+        pca_input_points = pca_input_points[~np.all(pca_input_points == 0, axis=1)]
+        # print("show shape of input pca_input_points:",pca_input_points.shape)
+    
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pca_input_points)
+        pca_input_points_smp = np.array(pcd.farthest_point_down_sample(2048).points)
+
+        gt_file_name= file_path.replace("pca_recon_", "")
+        data_gt_points_path= self.gt_points_path+gt_file_name
+        data_gt_points= np.asarray(np.loadtxt(data_gt_points_path))
+        # pca_input_points_pcd = o3d.geometry.PointCloud()
+        # data_gt_points_pcd = o3d.geometry.PointCloud()
+        # pca_input_points_pcd.points = o3d.utility.Vector3dVector(pca_input_points_smp)
+
+        # data_gt_points_pcd.points= o3d.utility.Vector3dVector(data_gt_points)
+
+
+        # data_gt_points_pcd = normalize_bounding_box_pcd(data_gt_points_pcd)
+
+        # data_gt_points_pcd_smp= np.array(data_gt_points_pcd.farthest_point_down_sample(2048).points)
+        data_gt_points_pcd_smp= data_gt_points #np.array(data_gt_points_pcd.points)
+
+        pca_input= pca_input_points_smp #np.asarray(pca_input_points_pcd.points)
+        gt_5k_points=np.asarray(data_gt_points_pcd_smp)
+        name = self.names[index]
+
+
+
+        # pca_input = self.pca_input_points_sets[index]
+        # name = self.names[index]
+        # gt_5k_points= self.gt_5k_points_sets[index]
+       
+
+        
+    
+        pca_input = torch.from_numpy(pca_input).float()
+        gt_5k_points= torch.from_numpy(gt_5k_points).float()
+        
+
+        
+
+        # return shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j
+        return name, gt_5k_points, pca_input
+
+    def __len__(self):
+        return len(self.names)
+    
+class shapelvlCompDataset(data.Dataset):
+    def __init__(self, args, set_type='val'):
+
+        # run dataloader for train, then val set
+
+        self.data_path = os.path.join(args.dataset, set_type+'_set_whole/', "pcaRcons/") 
+        # self.gt_points_path= os.path.join(args.dataset, set_type+'_set/', "gt_Input_10k/")
+        self.gt_points_path= os.path.join(args.dataset, set_type+'_set_whole/', "gt_Input/") 
+ 
+        self.num_points= args.num_input_points # 1024 
+ 
+        
+        self.data_files= sorted(os.listdir(self.data_path))
+        self.data_length = len(self.data_files)
+
+
+        self.pca_input_points_sets = []
+        self.gt_5k_points_sets = []
+        self.pca_recon_points_sets = []
+        self.pca_scales_sets = []
+        self.pca_theta_sets= []
+        self.names = []
+
+
+        for file in self.data_files:
+
+            data_pca_input = self.data_path + file   
+            # print("show val of data_pca_input:",data_pca_input)
+            # pca_input_points = np.asarray(np.loadtxt(data_pca_input))
+            # pca_input_points= pca_input_points[:,:3]
+            # pca_input_points = pca_input_points[~np.all(pca_input_points == 0, axis=1)]
+            # print("show shape of pca_input_points:",pca_input_points.shape)
+
+            # pcd = o3d.geometry.PointCloud()
+            # pcd.points = o3d.utility.Vector3dVector(pca_input_points)
+            # pca_input_points_smp = np.array(pcd.farthest_point_down_sample(2048).points)
+            # print("Sampled points shape:", pca_input_points_smp.shape)
+
+
+            # gt_file_name= file.replace("pca_recon_", "")
+            # data_gt_points_path= self.gt_points_path+gt_file_name
+            # data_gt_points= np.asarray(np.loadtxt(data_gt_points_path))
+            # # print("show shape of data_gt_points:",data_gt_points.shape)
+
+
+            # normalization here # TODO: change this
+            # pca_input_points_pcd = o3d.geometry.PointCloud()
+            # data_gt_points_pcd = o3d.geometry.PointCloud()
+            # pca_input_points_pcd.points = o3d.utility.Vector3dVector(pca_input_points_smp)
+            # data_gt_points_pcd.points= o3d.utility.Vector3dVector(data_gt_points)
+
+
+
+            # !!!!!!!!!!!!!!!!!!!!!!!
+            # not normalize here, we normalize and add noise before the model processing
+            # pca_input_points_pcd = normalize_bounding_box_pcd(pca_input_points_pcd)
+
+
+            # data_gt_points_pcd = normalize_bounding_box_pcd(data_gt_points_pcd)
+
+
+            # self.pca_input_points_sets.append(np.asarray(pca_input_points_pcd.points))
+            # self.gt_5k_points_sets.append(np.asarray(data_gt_points_pcd.points))
+            self.names.append(file.replace(".txt", ""))
+
+        # self.pca_input_points_sets_pca= np.array(self.pca_input_points_sets)
+        # self.pca_input_points_sets_pca_flat= self.pca_input_points_sets_pca.reshape(self.pca_input_points_sets_pca.shape[0], -1)
+        
+        
+
+
+        
+
+
+    def get_scale_factor(self, mean_shape_pcd):
+
+        aabb = mean_shape_pcd.get_axis_aligned_bounding_box()    
+        # Get the center of the bounding box
+        aabb_center = aabb.get_center()   
+
+
+        # Calculate extents of the bounding box
+        aabb_extent = aabb.get_extent()    
+        # Calculate the norm of the extents vector
+        norm_extent = np.linalg.norm(aabb_extent)    
+        # Determine the scaling factor as the reciprocal of the norm of the extents
+        scale_factor = 1 / norm_extent  
+
+
+
+        return (aabb_center, scale_factor)
+
+    def denormalize_for_inference(self, pcd, scale_factors):
+    
+        aabb_center= scale_factors[0]
+        scale_factor = scale_factors[1]
+        # Inverse the scaling
+        pcd.scale(1/scale_factor, center=[0, 0, 0])
+        # Inverse the translation
+        pcd= pcd.translate(aabb_center)
+        
+        return pcd
+    
+    def get_global_normalization(self):
+        return self.global_normalization
+
+
+    def combinations_to_idx(self, i, j):
+        """Convert a pair of indices to a linear index."""
+        idx = i * self.data_length + j
+        if hasattr(idx, "__len__"):
+            idx = np.array(idx, dtype=int)
+        else:
+            idx = int(idx)
+        return idx
+    
+    def idx_to_combinations(self, idx):
+        """Convert s linear index to a pair of indices."""
+        i = np.floor(idx / self.data_length)
+        j = idx - i * self.data_length
+        if hasattr(idx, "__len__"):
+            i = np.array(i, dtype=int)
+            j = np.array(j, dtype=int)
+        else:
+            i = int(i)
+            j = int(j)
+        return i, j
+
+
+    def __getitem__(self, index):
+
+
+        file_path= self.data_files[index]
+
+        data_pca_input = self.data_path + file_path
+        pca_input_points = np.asarray(np.loadtxt(data_pca_input))
+        pca_input_points= pca_input_points[:,:3]
+        pca_input_points = pca_input_points[~np.all(pca_input_points == 0, axis=1)]
+        # print("show shape of input pca_input_points:",pca_input_points.shape)
+    
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pca_input_points)
+        pca_input_points_smp = np.array(pcd.farthest_point_down_sample(2048).points)
+
+        gt_file_name= file_path.replace("pca_recon_", "")
+        data_gt_points_path= self.gt_points_path+gt_file_name
+        data_gt_points= np.asarray(np.loadtxt(data_gt_points_path))
+        pca_input_points_pcd = o3d.geometry.PointCloud()
+        data_gt_points_pcd = o3d.geometry.PointCloud()
+        pca_input_points_pcd.points = o3d.utility.Vector3dVector(pca_input_points_smp)
+
+        data_gt_points_pcd.points= o3d.utility.Vector3dVector(data_gt_points)
+
+
+        data_gt_points_pcd = normalize_bounding_box_pcd(data_gt_points_pcd)
+
+        # data_gt_points_pcd_smp= np.array(data_gt_points_pcd.farthest_point_down_sample(2048).points)
+        data_gt_points_pcd_smp= np.array(data_gt_points_pcd.points)
+
+        pca_input= np.asarray(pca_input_points_pcd.points)
+        gt_5k_points=np.asarray(data_gt_points_pcd_smp)
+        name = self.names[index]
+
+
+
+        # pca_input = self.pca_input_points_sets[index]
+        # name = self.names[index]
+        # gt_5k_points= self.gt_5k_points_sets[index]
+       
+
+        
+    
+        pca_input = torch.from_numpy(pca_input).float()
+        gt_5k_points= torch.from_numpy(gt_5k_points).float()
+        
+
+        
+
+        # return shape_idx, name, pca_theta, pca_input, shape_idx_j, name_j, pca_theta_j, pca_input_j
+        return name, gt_5k_points, pca_input
+
+    def __len__(self):
+        return len(self.names)
+    
 
 class inferPCDataset(data.Dataset):
     def __init__(self, args, set_type='val'):
@@ -866,6 +1297,7 @@ class PCDValataset(data.Dataset):
         # exit()
 
         PCAReconsPoints_noised=[]
+        PCAReconsPoints=[]
         mu=0
         sigma=1
         self.added_noise_dim= 200
@@ -904,6 +1336,7 @@ class PCDValataset(data.Dataset):
 
 
             PCAReconsPoints_noised.append(checkReconsPC_noised)
+            PCAReconsPoints.append(checkReconsPC)
 
 
             # pcd_view2 = o3d.geometry.PointCloud()
@@ -914,7 +1347,8 @@ class PCDValataset(data.Dataset):
 
         
         self.PCAReconsPoints_noised=np.array(PCAReconsPoints_noised)
-        self.pca_recons_points = np.array(checkReconsPC)
+
+        self.pca_recons_points = np.array(PCAReconsPoints)
 
         # print("see shape of pca_input_points_sets:",self.pca_input_points_sets_pca.shape)        
         # print("see shape of pca_input_points_sets_array_flat:",self.pca_input_points_sets_pca_flat.shape)       
@@ -1229,5 +1663,5 @@ class InferenceDataset(data.Dataset):
 
 
 # part level dataset
-class shapelvlDataset(data.Dataset):
-    pass
+# class shapelvlDataset(data.Dataset):
+#     pass

@@ -18,6 +18,9 @@ class Model(nn.Module):
 
         self.encoder = DGCNN_encoder(self.latent_dim)
 
+
+        
+
         self.attn_module = Attention_Module(self.latent_dim, self.num_output)
 
 

@@ -15,7 +15,7 @@ import torch_cluster
 class DGCNN_encoder(nn.Module):
     def __init__(self, latent_dim):
         super(DGCNN_encoder, self).__init__()
-        self.num_neighs = 27
+        self.num_neighs = 27 #27
         self.latent_dim = latent_dim
         self.input_features = 3 * 2
         self.only_true_neighs = True
@@ -61,28 +61,29 @@ class DGCNN_encoder(nn.Module):
 
     def forward(self, x, return_neighs=False):
         self.num_points = x.shape[1]
+        # show shape of x: torch.Size([5, 2048, 3])
+        # print("self.num_points:",self.num_points)#  2048
+        # print("self.num_neighs:",self.num_neighs) # 27
+        # print("self.batch_size:",x.shape[0]) # 5
+        # self.num_points: 2048
         batch_size = x.shape[0]
         sigmoid_for_classification=True
         edge_index = [
             torch_cluster.knn(x[i], x[i], self.num_neighs,)
             for i in range(x.shape[0])
         ]
+
+
         neigh_idx = torch.stack(
             [edge_index[i][1].reshape(x.shape[1], -1) for i in range(x.shape[0])]
         )
+
+        # print("self.neigh_idx:", neigh_idx.shape)
+        # self.neigh_idx: torch.Size([5, 2048, 0])
+        # exit()
         features_per_point = self.forward_per_point(x, start_neighs=neigh_idx) # dense_output_feature, B N F
         global_feature, _ = torch.max(features_per_point.transpose(1,2), 2)
 
-        # avg_features = torch.mean(features_per_point, dim=1)
-        # std_features = torch.std(features_per_point, dim=1)
-
-        # print("see avg_features:",avg_features.shape)
-        # print("see std_features:",std_features.shape)
-        # print("see global_feature:",global_feature.shape)
-        # see avg_features: torch.Size([1, 128])
-        # see std_features: torch.Size([1, 128])
-        # see global_feature: torch.Size([1, 128])
-        # exit()
 
         global_feature = global_feature.view(batch_size, -1)
         if return_neighs:

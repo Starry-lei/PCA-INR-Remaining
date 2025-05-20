@@ -6,7 +6,7 @@ class Model(nn.Module):
     def __init__(self, args):
         super(Model, self).__init__()
         self.input_size = 3           # Just the (x, y, z) of the PCA-reconstructed points
-        self.hidden_size = args.hidden_size
+        self.hidden_size = args.latent_dim
         self.output_size = 3          # Residual vector (dx, dy, dz)
         self.num_layers = args.num_layers
 
@@ -32,7 +32,7 @@ class Model(nn.Module):
 
         return nn.Sequential(*layers)
     
-    def forward(self, points, pca_coeffs):
+    def forward(self, points, pca_coeffs=None):
         """
         Args:
             points: Point cloud [batch_size, num_points, 3]

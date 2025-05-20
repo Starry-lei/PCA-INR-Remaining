@@ -348,16 +348,16 @@ def main():
 if __name__ == '__main__':
     # conda activate freereg strucNet/ freereg
     # python train_PointFilter.py -c cfgs/config.yaml
-
     # python train_PointFilter.py -c cfgs/config_part_back.yaml
     # python train_PointFilter.py -c cfgs/config_part_seat.yaml
     # python train_PointFilter.py -c cfgs/config_part_armrest.yaml
-
     #  inference
+    # train with more noise may result in better denoiser performance?
     # python infer_PointFilter.py -c cfgs/config_part_armrest.yaml
 
     # python train_PointFilter.py -c cfgs/infer_config.yaml
-    # python infer_PointFilter.py -c cfgs/infer_config.yaml
+    # python infer_PointFilter.py -c cfgs/infer_config_eva_cosine_decay.yaml
+
     main()
 
 
